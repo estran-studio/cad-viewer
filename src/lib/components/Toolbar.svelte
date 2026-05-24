@@ -4,6 +4,8 @@
   export let viewMode: ViewMode;
   export let onToggleViewMode: () => void;
   export let onToggleWireframe: () => void;
+  export let onToggleGrid: () => void;
+  export let gridVisible: boolean = true;
   export let onExportPNG: () => void;
 
   // Theme props
@@ -26,6 +28,7 @@
 >
   <button on:click={onToggleViewMode}>View: {viewMode}</button>
   <button on:click={onToggleWireframe}>Toggle Wireframe</button>
+  <button on:click={onToggleGrid}>Grid: {gridVisible ? 'on' : 'off'}</button>
   <button on:click={onExportPNG}>Export PNG</button>
 </div>
 

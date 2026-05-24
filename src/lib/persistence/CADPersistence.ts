@@ -14,6 +14,7 @@ export interface CADViewerState {
     orthographicZoom?: number; // Store zoom level for orthographic camera
   };
   wireframe: boolean;
+  grid?: boolean; // optional for back-compat with older saved entries
 }
 
 export class CADPersistence {
@@ -74,6 +75,7 @@ export class CADPersistence {
     controls: any,
     viewMode: ViewMode,
     wireframe: boolean,
+    grid: boolean,
     model?: { payload: string; payloadType: 'stl' | '3mf'; color: string }
   ): CADViewerState {
     // If we have a model, the target should always be (0,0,0) since models are centered
@@ -100,7 +102,8 @@ export class CADPersistence {
         mode: viewMode,
         orthographicZoom
       },
-      wireframe
+      wireframe,
+      grid,
     };
   }
 

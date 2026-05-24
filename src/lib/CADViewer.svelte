@@ -10,8 +10,12 @@
 
   // --- Props ---
   export let payload: string = '';
-  export let payloadType: 'stl' | '3mf' = 'stl';
+  export let payloadType: 'stl' | '3mf' | 'glb' = 'stl';
   export let color = '#fca503';
+  // When set, the viewer fetches this URL as binary and loads it (GLB/STL/3MF).
+  // Used by <cad-studio> for the live build123d model; the string `payload`
+  // path is left exactly as-is for existing consumers (vancad, vscode-openscad).
+  export let modelUrl: string = '';
   export let viewerBackgroundColor = '#1e1e1e';
   export let gridColor = '#888888';
   export let gridCenterLineColor = '#444444';
@@ -39,8 +43,12 @@
   let modelInfo: ModelInfo = { triangleCount: 0, dimensions: null };
   let viewMode: ViewMode = 'perspective';
   let isWireframeMode = false;
-  let currentModelData: { payload: string; payloadType: 'stl' | '3mf'; color: string } | null = null;
+  let gridVisible = true;
+  let currentModelData: { payload: string; payloadType: 'stl' | '3mf' | 'glb'; color: string } | null = null;
   let isInitialized = false;
+  let currentModelUrl: string | null = null;
+  let urlLoadSeq = 0;
+  let pendingLoad: { url: string; resolve: () => void; reject: (e: unknown) => void } | null = null;
 
   onMount(() => {
     initializeViewer();
@@ -172,6 +180,11 @@
       ModelOperations.setWireframeState(sceneManager.currentMesh, savedState.wireframe);
       isWireframeMode = savedState.wireframe;
     }
+
+    // Restore grid visibility (default: visible, for back-compat)
+    const savedGrid = savedState.grid ?? true;
+    sceneManager.setGridVisible(savedGrid);
+    gridVisible = savedGrid;
   }
 
   function saveCurrentState(force: boolean = false) {
@@ -182,6 +195,7 @@
       sceneManager.controls,
       viewMode,
       isWireframeMode,
+      gridVisible,
       currentModelData || undefined
     );
 
@@ -231,6 +245,12 @@
     sceneManager.exportScreenshot();
   }
 
+  function handleToggleGrid() {
+    gridVisible = !gridVisible;
+    sceneManager.setGridVisible(gridVisible);
+    if (isInitialized) saveCurrentState();
+  }
+
   // --- Public API for controlling persistence ---
   export function clearSavedState() {
     CADPersistence.clearState(persistenceId || undefined);
@@ -240,7 +260,112 @@
     return CADPersistence.loadState(persistenceId || undefined);
   }
 
+  // --- Binary model loading (used by <cad-studio>) ---
+  function inferType(url: string): 'stl' | '3mf' | 'glb' {
+    const u = url.split('?')[0].toLowerCase();
+    if (u.endsWith('.stl')) return 'stl';
+    if (u.endsWith('.3mf')) return '3mf';
+    return 'glb';
+  }
+
+  function applyPersistedView() {
+    if (!sceneManager || !cameraController) return;
+    const saved = CADPersistence.loadState(persistenceId || undefined);
+    if (!saved) return;
+    if (saved.camera.mode !== viewMode) {
+      viewMode = saved.camera.mode;
+      cameraController.setViewMode(viewMode);
+      sceneManager.updateCurrentCamera(cameraController.currentCamera);
+      sceneManager.controls.object = cameraController.currentCamera;
+    }
+    CADPersistence.applyState(saved, cameraController.currentCamera, sceneManager.controls);
+    if (sceneManager.currentMesh) {
+      ModelOperations.setWireframeState(sceneManager.currentMesh, saved.wireframe);
+      isWireframeMode = saved.wireframe;
+    }
+    const g = saved.grid ?? true;
+    sceneManager.setGridVisible(g);
+    gridVisible = g;
+  }
+
+  function _settleLoad(url: string, ok: boolean, err?: unknown) {
+    if (pendingLoad && pendingLoad.url === url) {
+      if (ok) pendingLoad.resolve();
+      else pendingLoad.reject(err);
+      pendingLoad = null;
+    }
+  }
+
+  async function loadFromUrl() {
+    if (!sceneManager || !modelUrl) return;
+    const seq = ++urlLoadSeq;
+    const url = modelUrl;
+    try {
+      const res = await fetch(url, { cache: 'no-store' });
+      if (!res.ok) {
+        console.warn('cad-viewer: model fetch failed', res.status);
+        _settleLoad(url, false, new Error('HTTP ' + res.status));
+        return;
+      }
+      const fmt = (res.headers.get('X-Model-Format') as 'stl' | '3mf' | 'glb')
+        || inferType(url);
+      const buf = await res.arrayBuffer();
+      if (seq !== urlLoadSeq) return; // a newer load superseded this one
+      modelInfo = await sceneManager.loadModelFromBuffer(buf, fmt, color);
+      const obj = sceneManager.currentObject ?? sceneManager.currentMesh;
+      if (obj) {
+        cameraController.frameToObject(obj, false);
+        sceneManager.controls.target.set(0, 0, 0);
+        sceneManager.controls.update();
+        isWireframeMode = ModelOperations.getWireframeState(sceneManager.currentMesh);
+        // Restore camera / wireframe / grid for THIS part's persistenceId.
+        applyPersistedView();
+      }
+      currentModelUrl = url;
+      _settleLoad(url, true);
+    } catch (err) {
+      console.error('cad-viewer: loadFromUrl error', err);
+      _settleLoad(url, false, err);
+    }
+  }
+
+  // --- Public API consumed by <cad-studio> on the custom element instance ---
+  // Resolves when the GLB has actually loaded into the scene (or rejects on
+  // fetch/parse failure). Lets the studio drive a loading overlay precisely.
+  export function loadModelUrl(url: string): Promise<void> {
+    return new Promise((resolve, reject) => {
+      // Supersede any in-flight load so its caller resolves (with an error
+      // it can ignore) instead of hanging on a never-settled promise.
+      if (pendingLoad) pendingLoad.reject(new Error('superseded'));
+      pendingLoad = { url, resolve, reject };
+      modelUrl = url; // triggers the reactive → loadFromUrl()
+    });
+  }
+
+  export function clearScene() {
+    sceneManager?.clear();
+  }
+
+  export function captureViewPNG(): string {
+    return sceneManager ? sceneManager.captureCanvasDataURL() : '';
+  }
+
+  export function pickNodeAt(clientX: number, clientY: number): string | null {
+    return sceneManager ? sceneManager.pickNodeAt(clientX, clientY) : null;
+  }
+
+  export function setNavigationEnabled(enabled: boolean) {
+    sceneManager?.setControlsEnabled(enabled);
+  }
+
+  export function getViewerCanvas(): HTMLCanvasElement | null {
+    return sceneManager ? sceneManager.getCanvas() : null;
+  }
+
   // --- Reactive Statements ---
+  $: if (sceneManager && modelUrl && modelUrl !== currentModelUrl) {
+    loadFromUrl();
+  }
   $: if (sceneManager && payload) {
     // Check if payload has changed compared to current model data
     const hasChanged = !currentModelData || 
@@ -302,6 +427,8 @@
     {viewMode}
     onToggleViewMode={handleToggleViewMode}
     onToggleWireframe={handleToggleWireframe}
+    onToggleGrid={handleToggleGrid}
+    {gridVisible}
     onExportPNG={handleExportPNG}
     {toolbarBackgroundColor}
     {toolbarButtonBackgroundColor}

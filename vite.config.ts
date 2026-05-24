@@ -3,6 +3,15 @@ import { svelte } from '@sveltejs/vite-plugin-svelte';
 import fs from 'fs';
 
 export default defineConfig({
+  // Dev only: proxy the studio's API/WS to the Python backend so
+  // `vite dev` works the same as the prod (backend-served) setup.
+  server: {
+    host: true,
+    proxy: {
+      '/api': { target: 'http://localhost:32324', changeOrigin: true },
+      '/ws': { target: 'ws://localhost:32324', ws: true },
+    },
+  },
   plugins: [
     svelte({
       // 1. Compile to a web component (custom element)
@@ -21,10 +30,12 @@ export default defineConfig({
           // Read the original HTML file
           const htmlContent = fs.readFileSync('index.html', 'utf-8');
           
-          // Replace the dev script tag with the built script
+          // Cache-bust: unique query per build → tablet browser can never
+          // re-use a previously cached bundle for a new build.
+          const v = Date.now();
           const modifiedHtml = htmlContent.replace(
             '<script type="module" src="/src/main.ts"></script>',
-            '<script type="module" src="./components.js"></script>'
+            `<script type="module" src="./components.js?v=${v}"></script>`
           );
           
           // Write the modified HTML to dist

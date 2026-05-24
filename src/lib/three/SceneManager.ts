@@ -1,8 +1,11 @@
 import * as THREE from 'three';
 import { STLLoader } from 'three/examples/jsm/loaders/STLLoader.js';
 import { ThreeMFLoader } from 'three/examples/jsm/loaders/3MFLoader.js';
+import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
 import { OrientationGizmo, type ViewDirection } from './OrientationGizmo.js';
+
+export type PayloadType = 'stl' | '3mf' | 'glb';
 
 export interface ModelInfo {
   triangleCount: number;
@@ -17,14 +20,22 @@ export class SceneManager {
   public orthographicCamera: THREE.OrthographicCamera;
   public currentCamera: THREE.PerspectiveCamera | THREE.OrthographicCamera;
   public currentMesh: THREE.Mesh | null = null;
+  // For GLB the loaded result is a whole scene graph (named nodes); for
+  // STL/3MF it's just the single mesh. Annotation picking walks this.
+  public currentObject: THREE.Object3D | null = null;
   public gridHelper!: THREE.GridHelper;
   private gridSize = 100;
   private gridDivisions = 100;
   private orientationGizmo: OrientationGizmo | null = null;
   private gizmoScale: number = 1.0; // Store the gizmo scale multiplier
+  private gridVisible: boolean = true; // toolbar toggle; survives grid recreation
+  private headLight!: THREE.DirectionalLight;
+  private headLightTarget!: THREE.Object3D;
 
   private stlLoader = new STLLoader();
   private threeMFLoader = new ThreeMFLoader();
+  private gltfLoader = new GLTFLoader();
+  private raycaster = new THREE.Raycaster();
   private animationFrameId: number | null = null;
 
   constructor(
@@ -55,16 +66,48 @@ export class SceneManager {
 
   private setupGrid(gridColor: string, gridCenterLineColor: string) {
     this.gridHelper = new THREE.GridHelper(this.gridSize, this.gridDivisions, gridColor, gridCenterLineColor);
+    this.gridHelper.visible = this.gridVisible;
     this.scene.add(this.gridHelper);
   }
 
+  public setGridVisible(visible: boolean) {
+    this.gridVisible = visible;
+    if (this.gridHelper) this.gridHelper.visible = visible;
+  }
+
+  public isGridVisible(): boolean {
+    return this.gridVisible;
+  }
+
   private setupLighting() {
-    const ambientLight = new THREE.AmbientLight(0xffffff, 0.7);
-    this.scene.add(ambientLight);
-    
-    const directionalLight = new THREE.DirectionalLight(0xffffff, 1);
-    directionalLight.position.set(5, 10, 7.5);
-    this.scene.add(directionalLight);
+    // Strong uniform fill so NO face ever falls into dark shadow, regardless
+    // of model orientation (build123d Z-up vs three.js Y-up doesn't matter).
+    this.scene.add(new THREE.AmbientLight(0xffffff, 0.9));
+
+    // One subtle side light just for edge readability (definition without shadow).
+    const side = new THREE.DirectionalLight(0xffffff, 0.25);
+    side.position.set(5, 10, 7.5);
+    this.scene.add(side);
+
+    // "Headlight": a directional light parented to the active camera. It
+    // shines along the camera's view direction → whatever you look at is
+    // always lit, never a dark backside. Cameras must be in the scene graph
+    // for child transforms to propagate.
+    this.scene.add(this.perspectiveCamera);
+    this.scene.add(this.orthographicCamera);
+    this.headLightTarget = new THREE.Object3D();
+    this.headLightTarget.position.set(0, 0, -1); // 1 unit in front of camera
+    this.headLight = new THREE.DirectionalLight(0xffffff, 0.6);
+    this.headLight.position.set(0, 0, 0);
+    this.headLight.target = this.headLightTarget;
+    this.attachHeadlightTo(this.currentCamera);
+  }
+
+  private attachHeadlightTo(cam: THREE.Camera) {
+    this.headLight.parent?.remove(this.headLight);
+    this.headLightTarget.parent?.remove(this.headLightTarget);
+    cam.add(this.headLight);
+    cam.add(this.headLightTarget);
   }
 
   private setupRenderer(container: HTMLElement) {
@@ -91,24 +134,16 @@ export class SceneManager {
       margin: 20
     });
     
-    // Handle axis clicks to change view
+    // Handle axis clicks: re-orient ONLY — keep the current orbit target and
+    // the current camera distance (don't snap-zoom on every cube click).
     this.orientationGizmo.onAxisClick = (direction: THREE.Vector3) => {
-      const currentMesh = this.currentMesh;
-      if (!currentMesh) return;
+      const center = this.controls.target.clone();
+      const distance = this.currentCamera.position.distanceTo(center) || 1;
 
-      if (!currentMesh.geometry.boundingSphere) {
-        currentMesh.geometry.computeBoundingSphere();
-      }
-
-      const distance = currentMesh.geometry.boundingSphere!.radius * 2;
-      const position = direction.multiplyScalar(distance);
-
-      const box = new THREE.Box3().setFromObject(currentMesh);
-      const center = box.getCenter(new THREE.Vector3());
-
-      this.currentCamera.position.copy(center.clone().add(position));
+      this.currentCamera.position.copy(
+        center.clone().add(direction.clone().normalize().multiplyScalar(distance))
+      );
       this.currentCamera.lookAt(center);
-      this.controls.target.copy(center);
       this.controls.update();
     };
   }
@@ -171,7 +206,8 @@ export class SceneManager {
 
   public updateCurrentCamera(camera: THREE.PerspectiveCamera | THREE.OrthographicCamera) {
     this.currentCamera = camera;
-    
+    if (this.headLight) this.attachHeadlightTo(camera); // headlight follows the active cam
+
     // Update orientation gizmo to use new camera
     if (this.orientationGizmo) {
       this.orientationGizmo.updateMainCamera(camera);
@@ -205,6 +241,7 @@ export class SceneManager {
       gridColor,
       gridCenterLineColor
     );
+    this.gridHelper.visible = this.gridVisible;
     this.scene.add(this.gridHelper);
   }
 
@@ -219,6 +256,7 @@ export class SceneManager {
       this.gridHelper.material.color,
       this.gridHelper.material.color
     );
+    this.gridHelper.visible = this.gridVisible;
     this.scene.add(this.gridHelper);
   }
 
@@ -292,6 +330,8 @@ export class SceneManager {
     };
   }
 
+  public clear() { this.clearCurrentModel(); }
+
   private clearCurrentModel() {
     if (this.currentMesh) {
       this.scene.remove(this.currentMesh);
@@ -302,6 +342,19 @@ export class SceneManager {
         this.currentMesh.material.dispose();
       }
       this.currentMesh = null;
+    }
+    if (this.currentObject) {
+      this.scene.remove(this.currentObject);
+      this.currentObject.traverse((o) => {
+        const m = o as THREE.Mesh;
+        if (m.isMesh) {
+          m.geometry?.dispose();
+          const mat = m.material;
+          if (Array.isArray(mat)) mat.forEach(x => x.dispose());
+          else mat?.dispose();
+        }
+      });
+      this.currentObject = null;
     }
   }
 
@@ -324,9 +377,100 @@ export class SceneManager {
     this.currentCamera.updateProjectionMatrix();
   }
 
-  public exportScreenshot() {
+  /**
+   * Load a model from raw bytes. GLB keeps its scene graph + node names
+   * (so annotation can say "you circled node X") and its authored colours;
+   * STL/3MF binary reuse the existing single-mesh material. Additive — the
+   * string `loadModel()` path used by <cad-viewer>'s `payload` is untouched.
+   */
+  public async loadModelFromBuffer(
+    buffer: ArrayBuffer,
+    payloadType: PayloadType,
+    color: string
+  ): Promise<ModelInfo> {
+    this.clearCurrentModel();
+    const meshes: THREE.Mesh[] = [];
+
+    if (payloadType === 'glb') {
+      const gltf = await new Promise<any>((resolve, reject) =>
+        this.gltfLoader.parse(buffer, '', resolve, reject)
+      );
+      const root: THREE.Object3D = gltf.scene || gltf.scenes?.[0];
+      root.traverse((o) => {
+        const m = o as THREE.Mesh;
+        if (m.isMesh) {
+          m.castShadow = m.receiveShadow = false;
+          meshes.push(m);
+        }
+      });
+      this.scene.add(root);
+      this.currentObject = root;
+      this.currentMesh = meshes[0] ?? null;
+    } else if (payloadType === 'stl') {
+      const geometry = this.stlLoader.parse(buffer);
+      const material = new THREE.MeshStandardMaterial({
+        color,
+        metalness: 0.1,
+        roughness: 0.75,
+      });
+      const mesh = new THREE.Mesh(geometry, material);
+      this.scene.add(mesh);
+      meshes.push(mesh);
+      this.currentMesh = mesh;
+      this.currentObject = mesh;
+    } else {
+      const object = this.threeMFLoader.parse(buffer);
+      this.addMeshesRecursively(object, meshes);
+      this.scene.add(object);
+      this.currentObject = object;
+      this.currentMesh = meshes[0] ?? null;
+    }
+
+    if (meshes.length === 0) return { triangleCount: 0, dimensions: null };
+    return this.calculateModelInfo(meshes);
+  }
+
+  /** Re-render this frame and return it as a PNG data URL (for compositing). */
+  public captureCanvasDataURL(): string {
     this.renderer.render(this.scene, this.currentCamera);
-    const dataURL = this.renderer.domElement.toDataURL('image/png');
+    return this.renderer.domElement.toDataURL('image/png');
+  }
+
+  public getCanvas(): HTMLCanvasElement {
+    return this.renderer.domElement;
+  }
+
+  /** Freeze/unfreeze 3D navigation (used while the user is drawing). */
+  public setControlsEnabled(enabled: boolean) {
+    if (this.controls) this.controls.enabled = enabled;
+  }
+
+  /**
+   * Raycast a screen point against the model and return the name of the
+   * nearest named node (GLB nodes carry their build123d label). null if the
+   * point misses or the format has no node names (STL).
+   */
+  public pickNodeAt(clientX: number, clientY: number): string | null {
+    const target = this.currentObject ?? this.currentMesh;
+    if (!target) return null;
+    const rect = this.renderer.domElement.getBoundingClientRect();
+    const ndc = new THREE.Vector2(
+      ((clientX - rect.left) / rect.width) * 2 - 1,
+      -((clientY - rect.top) / rect.height) * 2 + 1
+    );
+    this.raycaster.setFromCamera(ndc, this.currentCamera);
+    const hits = this.raycaster.intersectObject(target, true);
+    if (hits.length === 0) return null;
+    let o: THREE.Object3D | null = hits[0].object;
+    while (o) {
+      if (o.name && o !== this.currentObject) return o.name;
+      o = o.parent;
+    }
+    return null;
+  }
+
+  public exportScreenshot() {
+    const dataURL = this.captureCanvasDataURL();
     const link = document.createElement('a');
     link.href = dataURL;
     link.download = 'screenshot.png';

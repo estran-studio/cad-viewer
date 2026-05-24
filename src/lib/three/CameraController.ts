@@ -98,11 +98,22 @@ export class CameraController {
     this.controls.update();
   }
 
-  public frameToObject(mesh: THREE.Mesh, resetPosition = true) {
+  public frameToObject(mesh: THREE.Object3D, resetPosition = true) {
     const boundingBox = new THREE.Box3().setFromObject(mesh);
     const center = boundingBox.getCenter(new THREE.Vector3());
     const size = boundingBox.getSize(new THREE.Vector3());
     const maxDim = Math.max(size.x, size.y, size.z);
+
+    // Scale clip planes to the model so small parts don't clip when you
+    // zoom in close (default near=0.1 clips ~mm-scale features).
+    const near = Math.max(maxDim / 500, 0.01);
+    const far = Math.max(maxDim * 50, 1000);
+    this.perspectiveCamera.near = near;
+    this.perspectiveCamera.far = far;
+    this.perspectiveCamera.updateProjectionMatrix();
+    this.orthographicCamera.near = near;
+    this.orthographicCamera.far = far;
+    this.orthographicCamera.updateProjectionMatrix();
 
     // Center the model
     mesh.position.sub(center);

@@ -1,0 +1,15 @@
+# cad-viewer — registre explicite des pièces build123d.
+# Lancé une fois :  uv run --project server cad-viewer-serve --config ./cad-viewer.toml
+# Laisser tourner ; N instances Claude Code branchent http://localhost:32325/mcp.
+
+[server]
+host = "0.0.0.0"   # la tablette (LAN/Tailscale) doit joindre ; MCP via localhost
+port = 32325
+
+[[project]]
+name = "my_fleet"
+root = "/Users/wq/Project/bascanada/my_fleet/cad"
+# Auto-découverte : toutes les pièces sous parts/ (les __init__.py sont
+# ignorés). Build lazy : une pièce n'est construite qu'à sa 1re ouverture.
+glob = "parts/**/*.py"
+# parts = [ ... ]   # liste explicite encore possible (union avec glob, dédup)

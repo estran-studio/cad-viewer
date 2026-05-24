@@ -1,0 +1,40 @@
+# cad-viewer — instance unique long-vivante (OrbStack / Docker).
+#
+# Démarrage :   docker compose up -d --build
+# Logs    :     docker compose logs -f
+# OrbStack relancera le conteneur automatiquement (restart: unless-stopped).
+#
+# Tablette → http://<mac-LAN-or-tailscale-ip>:32325
+# Claude   → ~/.claude.json déjà à http://localhost:32325/mcp/ — inchangé,
+#            OrbStack publie 32325 sur le host.
+
+services:
+  cad-viewer:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: cad-viewer:latest
+    container_name: cad-viewer
+    # cadquery-ocp ne publie pas de wheel linux/arm64 — on tourne en
+    # linux/amd64 via Rosetta (supporté nativement par OrbStack/Apple Silicon).
+    platform: linux/amd64
+    restart: unless-stopped
+    ports:
+      - "32325:32325"
+    volumes:
+      # Bind-mount au MÊME chemin host = container → le cad-viewer.toml
+      # (root = /Users/wq/...) marche pareil pour `make serve` et Docker.
+      - /Users/wq/Project/bascanada/my_fleet/cad:/Users/wq/Project/bascanada/my_fleet/cad:ro
+      # Le fichier de config monté en lecture seule.
+      - ./cad-viewer.toml:/app/cad-viewer.toml:ro
+    environment:
+      # Filet de sécurité watcher si jamais virtiofs+inotify pose problème
+      # (active le polling — léger coût CPU). Décommente si live-reload muet.
+      # WATCHFILES_FORCE_POLLING: "true"
+      PYTHONUNBUFFERED: "1"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:32325/api/parts',timeout=2).status==200 else 1)"]
+      interval: 30s
+      timeout: 4s
+      retries: 3
+      start_period: 20s

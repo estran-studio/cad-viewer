@@ -1,0 +1,16 @@
+.git
+.gitignore
+.github
+.idea
+.vscode
+.DS_Store
+*.log
+node_modules
+dist
+dist-ssr
+*.local
+server/.venv
+server/**/__pycache__
+server/**/*.egg-info
+server/.uv-cache
+README.md

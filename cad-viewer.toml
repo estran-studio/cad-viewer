@@ -21,6 +21,7 @@ parts = [
     "hull.py",
     "superstructure.py",
     "thruster_mounts.py",
+    "sealed_compartment.py",
     "stealth_scout.py",
 ]
 

@@ -6,6 +6,23 @@
 host = "0.0.0.0"   # la tablette (LAN/Tailscale) doit joindre ; MCP via localhost
 port = 32325
 
+# Stealth Scout — K3 SCOUT clone, RC scale (Fleet boat #3).
+# Listé en PREMIER pour que la dédup par chemin absolu (cf. config.py) prenne
+# ces fichiers ici, et que le glob my_fleet suivant les ignore → ils
+# apparaissent SOUS leur propre catégorie « stealth_scout » dans le sidebar
+# tablette au lieu d'être noyés sous « boat ». Liste explicite = seuls les
+# vrais modèles CAD (les helpers extract_svg / generate_design restent
+# visibles sous « boat » via my_fleet, ou peuvent être migrés si on veut les
+# cacher complètement).
+[[project]]
+name = "stealth_scout"
+root = "/Users/wq/Project/bascanada/my_fleet/cad/parts/boat/stealth_scout"
+parts = [
+    "hull.py",
+    "superstructure.py",
+    "stealth_scout.py",
+]
+
 [[project]]
 name = "my_fleet"
 root = "/Users/wq/Project/bascanada/my_fleet/cad"

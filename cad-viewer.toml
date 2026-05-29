@@ -19,6 +19,7 @@ name = "stealth_scout"
 root = "/Users/wq/Project/bascanada/my_fleet/cad/parts/boat/stealth_scout"
 parts = [
     "hull.py",
+    "hull_shell.py",
     "superstructure.py",
     "thruster_mounts.py",
     "sealed_compartment.py",

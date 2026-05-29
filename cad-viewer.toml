@@ -24,6 +24,7 @@ parts = [
     "thruster_mounts.py",
     "sealed_compartment.py",
     "deck_openings.py",
+    "stealth_scout_split.py",
     "stealth_scout.py",
 ]
 

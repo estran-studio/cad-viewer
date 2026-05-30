@@ -13,8 +13,11 @@ RUN npm run build      # → /web/dist/{components.js, index.html, …}
 
 
 # ---------- stage 2: runtime (Python + uv + build123d) ----------
-# linux/amd64 obligatoire : cadquery-ocp n'a pas de wheel linux/arm64.
+# linux/amd64 obligatoire : cadquery-ocp n'a pas de wheel linux/arm64
+# (confirmed 2026-05-28 — seulement macosx_11_0_arm64 mais pas linux/aarch64).
 # Tourne via Rosetta sur Apple Silicon (OrbStack/Docker Desktop natif).
+# Pour build natif ARM = exécuter cad-viewer-serve directement sur le Mac
+# (hors Docker), wheel macosx_11_0_arm64 dispo pour cadquery-ocp.
 FROM --platform=linux/amd64 python:3.13-slim AS runtime
 ENV PYTHONUNBUFFERED=1 \
     UV_LINK_MODE=copy \

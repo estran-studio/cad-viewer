@@ -73,6 +73,31 @@ def _import_part(file_path: Path, project_root: Path | None):
     # Drop a previous instance so a re-run re-executes top-level code fresh.
     sys.modules.pop("_cad_viewer_part", None)
     sys.modules["_cad_viewer_part"] = module
+    # ALSO clear cached sibling modules in the SAME directory tree as the
+    # file being loaded + any sys.modules entry that SHADOWS a sibling .py
+    # file (name collision : two parts/<vehicle>/<part>/hull.py both register
+    # as `hull` in sys.modules). Without this, shell.py does `from hull import
+    # ...` and gets a hull.py from a *different* vehicle (loaded earlier),
+    # silently — symptoms : TypeError on signature mismatch, or stale results.
+    # Scope LIMITED to sibling dir to keep heavy shared helpers (fleet_cad/*)
+    # cached → 5-10x faster live editing. Trade-off : fleet_cad/* changes need
+    # a container restart to propagate.
+    file_dir = file_path.resolve().parent
+    file_dir_str = str(file_dir)
+    sibling_stems = {p.stem for p in file_dir.glob("*.py")}
+    stale_keys = [
+        name for name, mod in list(sys.modules.items())
+        if name not in {"_cad_viewer_part", "__main__"}
+        and (
+            # Same directory tree
+            (getattr(mod, "__file__", None)
+             and str(Path(mod.__file__).resolve().parent) == file_dir_str)
+            # OR name shadow : sibling .py exists with this module name
+            or name in sibling_stems
+        )
+    ]
+    for name in stale_keys:
+        sys.modules.pop(name, None)
     try:
         spec.loader.exec_module(module)
     except Exception as exc:  # noqa: BLE001 — surface the full traceback

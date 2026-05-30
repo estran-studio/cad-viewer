@@ -48,6 +48,12 @@
   let pickedNode: string | null = null;
   let bg: HTMLImageElement | null = null;
 
+  // ---- reference library (server-persisted, per part) ----
+  interface RefInfo { id: number; label: string; note: string; bytes: number; created_at: number; url: string; }
+  let refs: RefInfo[] = [];
+  let lastRefBlob: Blob | null = null; // a freshly loaded ref not yet kept
+  let keeping = false;
+
   let wsState: 'connecting' | 'live' | 'down' = 'connecting';
   let version = 0;
   let toast = '';
@@ -90,6 +96,7 @@
     // Click the active icon → collapse; click another → switch & open.
     if (sidebarOpen && activeView === v) sidebarOpen = false;
     else { activeView = v; sidebarOpen = true; }
+    if (v === 'refs') refreshRefs();
     saveStudioState();
   }
 
@@ -226,6 +233,7 @@
     if (mode === 'draw') exitDraw();
     loadModel({ isSwitch: true });
     wsSubscribe();
+    refreshRefs();
   }
 
   function closeTab(id: string) {
@@ -416,6 +424,7 @@
   }
 
   function loadReference(file: Blob) {
+    lastRefBlob = file; // newly loaded, not yet in the library → offer "Garder"
     const img = new Image();
     img.onload = () => {
       bg = img;
@@ -428,6 +437,62 @@
       redraw();
     };
     img.src = URL.createObjectURL(file);
+  }
+
+  // ---- reference library ----------------------------------------------
+  async function refreshRefs() {
+    if (!currentPartId) { refs = []; return; }
+    try {
+      const r = await fetch(
+        `${apiBase}/api/references?part=${encodeURIComponent(currentPartId)}`,
+        { cache: 'no-store' }
+      );
+      const j = await r.json();
+      refs = j.items || [];
+    } catch { /* keep last */ }
+  }
+
+  function loadReferenceFromLibrary(rf: RefInfo) {
+    lastRefBlob = null; // already persisted → no "Garder"
+    const img = new Image();
+    img.onload = () => {
+      bg = img;
+      strokes = [];
+      current = [];
+      pickedNode = null;
+      kind = 'reference';
+      mode = 'draw';
+      viewerEl?.setNavigationEnabled?.(false);
+      redraw();
+    };
+    img.src = `${apiBase}${rf.url}`;
+  }
+
+  async function keepReference() {
+    if (!lastRefBlob || !currentPartId || keeping) return;
+    keeping = true;
+    try {
+      const fd = new FormData();
+      fd.append('image', lastRefBlob, 'reference.png');
+      fd.append('part', currentPartId);
+      const r = await fetch(`${apiBase}/api/references`, { method: 'POST', body: fd });
+      if (!r.ok) throw new Error('HTTP ' + r.status);
+      lastRefBlob = null;
+      await refreshRefs();
+      showToast('📌 Référence gardée');
+    } catch (e) { showToast('✗ ' + (e as Error).message); }
+    finally { keeping = false; }
+  }
+
+  async function deleteRef(id: number) {
+    if (!currentPartId) return;
+    const fd = new FormData();
+    fd.append('part', currentPartId);
+    fd.append('id', String(id));
+    try {
+      await fetch(`${apiBase}/api/references`, { method: 'DELETE', body: fd });
+      await refreshRefs();
+    } catch { /* */ }
   }
 
   // ---- send to Claude --------------------------------------------------
@@ -542,8 +607,32 @@
       <div class="side-head">Paramètres</div>
       <div class="side-empty">Bientôt — sliders &amp; toggles des modèles paramétriques (phase 3).</div>
     {:else}
-      <div class="side-head">Références</div>
-      <div class="side-empty">Bientôt — bibliothèque d'images de référence partagée avec Claude (phase 2).</div>
+      <div class="side-head">Références{#if currentPartId} · {refs.length}{/if}</div>
+      <div class="side-scroll">
+        {#if !currentPartId}
+          <div class="side-empty">Sélectionne une pièce.</div>
+        {:else}
+          <label class="ref-add">
+            ＋ Ajouter une image
+            <input type="file" accept="image/*" on:change={onPickFile} />
+          </label>
+          {#if !refs.length}
+            <div class="side-empty">Aucune référence. Colle une image (⌘V) ou ajoute-en une — elle est gardée sur le serveur et visible par Claude.</div>
+          {/if}
+          {#each refs as rf (rf.id)}
+            <div class="ref-card">
+              <button class="ref-thumb" on:click={() => loadReferenceFromLibrary(rf)} title="Annoter sur cette référence">
+                <img src={`${apiBase}${rf.url}`} alt={rf.label || ('réf ' + rf.id)} />
+              </button>
+              <div class="ref-meta">
+                <div class="ref-label">{rf.label || ('réf #' + rf.id)}</div>
+                {#if rf.note}<div class="ref-note">{rf.note}</div>{/if}
+              </div>
+              <button class="ref-del" aria-label="supprimer" title="supprimer" on:click={() => deleteRef(rf.id)}>🗑</button>
+            </div>
+          {/each}
+        {/if}
+      </div>
     {/if}
   </aside>
 
@@ -584,6 +673,9 @@
         </div>
         <button on:click={undo} disabled={strokes.length === 0}>↶ Annuler</button>
         <button on:click={clearInk} disabled={strokes.length === 0}>Effacer</button>
+        {#if kind === 'reference' && lastRefBlob}
+          <button on:click={keepReference} disabled={keeping}>{keeping ? '…' : '📌 Garder'}</button>
+        {/if}
         <input class="note" placeholder="Note pour Claude (ex: +2mm ce trou)" bind:value={note} />
         <button class="primary" on:click={send} disabled={sending}>{sending ? '…' : '➤ Envoyer'}</button>
         <button on:click={exitDraw}>✕</button>
@@ -683,6 +775,33 @@
   .side-scroll { flex: 1 1 auto; overflow-y: auto; padding: 6px;
     -webkit-overflow-scrolling: touch; }
   .side-empty { padding: 16px 14px; color: #6f6f73; font-size: 13px; line-height: 1.5; }
+
+  /* reference library cards */
+  .ref-add {
+    display: flex; align-items: center; justify-content: center; gap: 6px;
+    margin: 6px; padding: 9px; border: 1px dashed #3a3a3c; border-radius: 8px;
+    color: #b9b9bd; font-size: 13px; cursor: pointer; position: relative; overflow: hidden;
+  }
+  .ref-add:hover { background: #242426; }
+  .ref-add input { position: absolute; inset: 0; opacity: 0; cursor: pointer; }
+  .ref-card {
+    display: flex; align-items: center; gap: 8px; padding: 6px; margin: 4px 2px;
+    border-radius: 8px;
+  }
+  .ref-card:hover { background: #242426; }
+  .ref-thumb {
+    flex: 0 0 auto; width: 56px; height: 44px; padding: 0; border-radius: 6px;
+    border: 1px solid #3a3a3c; background: #111; cursor: pointer; overflow: hidden;
+  }
+  .ref-thumb img { width: 100%; height: 100%; object-fit: cover; display: block; }
+  .ref-meta { flex: 1 1 auto; min-width: 0; }
+  .ref-label { font-size: 13px; color: #e2e2e4; overflow: hidden;
+    text-overflow: ellipsis; white-space: nowrap; }
+  .ref-note { font-size: 11px; color: #8a8a8e; overflow: hidden;
+    text-overflow: ellipsis; white-space: nowrap; }
+  .ref-del { flex: 0 0 auto; background: none; border: none; cursor: pointer;
+    font-size: 14px; opacity: 0.5; min-width: 30px; height: 30px; border-radius: 6px; }
+  .ref-del:hover { opacity: 1; background: rgba(255,80,80,0.18); }
   .group-label { color: #8a8a8e; font-size: 11px; text-transform: uppercase;
     letter-spacing: .5px; padding: 8px 8px 4px; }
   .group-sep { height: 1px; background: #2c2c2e; margin: 8px 4px; }

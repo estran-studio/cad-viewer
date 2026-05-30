@@ -107,24 +107,85 @@ class BuildQueue:
             while ps.build_attempts == start and time.time() < deadline:
                 ps.build_cv.wait(timeout=max(0.05, deadline - time.time()))
 
-    def _run(self) -> None:
-        # Lazy import avoids an import cycle (watcher imports state, state owns us).
-        from .watcher import build_part
+    def rebuild_and_wait(self, ps: "PartState", timeout: float = 180.0) -> None:
+        """Force a fresh build of the CURRENT combo (ignores cache) and wait."""
+        start = ps.build_attempts
+        ps.cache_clear()
+        self.request(ps, PRIO_INTERACTIVE)
+        deadline = time.time() + timeout
+        with ps.build_cv:
+            while ps.build_attempts == start and time.time() < deadline:
+                ps.build_cv.wait(timeout=max(0.05, deadline - time.time()))
 
+    def _run(self) -> None:
+        # Dispatcher: pop in priority order, submit to the process pool, and
+        # throttle to pool size. OCP runs in the workers (parallel); we only
+        # apply the picklable result back here (set_model / cache / errors).
+        sem = threading.Semaphore(self.registry.build_pool.workers)
         while True:
             _prio, _seq, part_id, values, display = self._q.get()
             ps = self.registry.parts.get(part_id)
             if ps is None:
                 continue
+            vals = ps.param_values if values is None else values
             vkey = "<current>" if values is None else ps._cache_key(values)
             qkey = (part_id, vkey, display)
             with self._lock:
                 if self._queued.get(qkey) is None:
                     continue  # stale duplicate already handled
                 self._queued.pop(qkey, None)
-            try:
-                ok, _msg = build_part(self.registry, ps, values=values, display=display)
-                if ok and display:
+
+            # Cache fast-path — no subprocess needed.
+            hit = ps.cache_get(vals)
+            if hit is not None:
+                if display:
+                    self._apply_entry(ps, hit)
                     self._schedule_prewarm(ps)
-            except Exception:  # noqa: BLE001 — never let the worker die
-                log.exception("build worker error on %s", part_id)
+                continue
+
+            sem.acquire()  # block when pool-size builds are already in flight
+            try:
+                fut = self.registry.build_pool.submit(ps.part_path, ps.project_root, vals)
+            except Exception:  # noqa: BLE001 — broken pool → reset so it recreates
+                sem.release()
+                log.exception("submit build failed on %s; resetting pool", part_id)
+                self.registry.build_pool.shutdown()
+                continue
+            fut.add_done_callback(
+                lambda f, ps=ps, vals=vals, display=display: self._apply(f, ps, vals, display, sem)
+            )
+
+    def _apply_entry(self, ps: "PartState", entry: dict) -> None:
+        ps.set_model(
+            entry["data"], entry["fmt"], obj=entry.get("obj"),
+            node_names=entry["nodes"], bbox=entry["bbox"], volume=entry["volume"],
+            param_schema=entry["schema"],
+        )
+        ps.mark_build_done()
+
+    def _apply(self, future, ps: "PartState", vals: dict, display: bool, sem) -> None:
+        # Done-callbacks for a ProcessPoolExecutor run serially in its result
+        # thread, so set_model/cache mutations here never race each other.
+        try:
+            payload = future.result()
+        except Exception as exc:  # noqa: BLE001 — worker process died, etc.
+            payload = {"ok": False, "error": f"build process error: {exc}"}
+            self.registry.build_pool.shutdown()  # poisoned pool → recreate next time
+        finally:
+            sem.release()
+        try:
+            if payload.get("ok"):
+                entry = {
+                    "data": payload["data"], "fmt": payload["fmt"], "obj": None,
+                    "nodes": payload["nodes"], "bbox": payload["bbox"],
+                    "volume": payload["volume"], "schema": payload["schema"],
+                }
+                ps.cache_put(vals, entry)
+                if display:
+                    self._apply_entry(ps, entry)
+                    self._schedule_prewarm(ps)
+            elif display:
+                ps.set_build_error(payload.get("error", "build failed"))
+                ps.mark_build_done()
+        except Exception:  # noqa: BLE001
+            log.exception("apply build result failed on %s", ps.part_id)

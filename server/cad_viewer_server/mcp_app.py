@@ -23,7 +23,7 @@ import anyio
 from mcp.server.fastmcp import Context, FastMCP
 from mcp.types import ImageContent, TextContent
 
-from .loader import part_info_text
+from .loader import load_part, part_info_text
 from .render import render_iso_png
 from .state import PartState, Registry
 from .watcher import build_part, open_part
@@ -256,11 +256,17 @@ def build_mcp(registry: Registry) -> FastMCP:
             return [_text(err)]
 
         def _render() -> bytes | None:
-            open_part(registry, ps.part_id)
-            if not ps.build_ok or ps.last_obj is None:
-                return None
+            # pool builds don't keep the Shape (not picklable) → build in-process
             with registry.build_lock:
-                return render_iso_png(ps.last_obj)
+                try:
+                    res = load_part(
+                        Path(ps.part_path),
+                        Path(ps.project_root) if ps.project_root else None,
+                        overrides=ps.param_values,
+                    )
+                    return render_iso_png(res.obj)
+                except Exception:  # noqa: BLE001
+                    return None
 
         render = await anyio.to_thread.run_sync(_render)
         out: list = []
@@ -297,12 +303,18 @@ def build_mcp(registry: Registry) -> FastMCP:
             return [_text(err)]
 
         def _impl() -> list:
-            open_part(registry, ps.part_id)
-            if not ps.build_ok or ps.last_obj is None:
-                return [_text(f"Build échoué:\n\n{ps.build_error}")]
-            with registry.build_lock:  # render tessellates → serialize w/ builds
+            # pool builds don't keep the Shape → build in-process for the render
+            with registry.build_lock:
                 try:
-                    png = render_iso_png(ps.last_obj)
+                    res = load_part(
+                        Path(ps.part_path),
+                        Path(ps.project_root) if ps.project_root else None,
+                        overrides=ps.param_values,
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    return [_text(f"Build échoué:\n\n{exc}")]
+                try:
+                    png = render_iso_png(res.obj)
                 except Exception as exc:  # noqa: BLE001
                     return [_text(f"Rendu échoué: {type(exc).__name__}: {exc}")]
             txt = json.dumps(ps.status(), indent=2, ensure_ascii=False)

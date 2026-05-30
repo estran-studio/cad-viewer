@@ -41,6 +41,7 @@ def create_app(registry: Registry) -> FastAPI:
             log.info("mcp: streamable-http session manager up")
             yield
         shutdown_watchers(registry)
+        registry.build_pool.shutdown()
 
     app = FastAPI(title="cad-viewer", docs_url=None, redoc_url=None, lifespan=lifespan)
     app.state.mcp = mcp

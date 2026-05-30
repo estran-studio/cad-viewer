@@ -39,6 +39,10 @@ services:
       PYTHONUNBUFFERED: "1"
       # Racine des données persistantes (cf. references.ReferenceStore).
       CAD_VIEWER_DATA: "/data"
+      # Nb de process de build parallèles (cf. procbuild.BuildPool). Chaque
+      # worker charge OCP (~plusieurs centaines de Mo, + lent sous Rosetta) →
+      # plafonné pour borner la RAM. Ajuste selon les cœurs/RAM dispo.
+      CAD_VIEWER_BUILD_WORKERS: "4"
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:32325/api/parts',timeout=2).status==200 else 1)"]
       interval: 30s

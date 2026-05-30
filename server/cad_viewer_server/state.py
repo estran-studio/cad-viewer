@@ -382,6 +382,10 @@ class Registry:
         from .paramstore import ParamStore
 
         self.params = ParamStore()
+        # Out-of-process build pool (parallel OCP builds across cores).
+        from .procbuild import BuildPool
+
+        self.build_pool = BuildPool()
 
     def bind_loop(self, loop: asyncio.AbstractEventLoop) -> None:
         self.hub.bind_loop(loop)

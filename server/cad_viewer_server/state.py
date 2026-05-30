@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import itertools
+import json
 import logging
 import threading
 import time
@@ -130,6 +131,9 @@ class PartState:
     # ---- parameters (cad_viewer.params) ----------------------------------
     param_schema: list = field(default_factory=list)   # declared by the part
     param_values: dict = field(default_factory=dict)   # current overrides
+    # build cache keyed by parameter combo → instant re-switch to a combo
+    # already built. Cleared when the part's source changes (watcher).
+    param_cache: dict = field(default_factory=dict)
 
     # ---- build queue bookkeeping (see builder.BuildQueue) ----------------
     build_requested_at: float = 0.0   # when it was enqueued while not building
@@ -290,6 +294,37 @@ class PartState:
             self.part_id, fb.id, len(png), bool(note),
         )
         return fb
+
+    # ---- build cache (keyed by parameter combo) -------------------------
+    _CACHE_CAP = 16
+
+    @staticmethod
+    def _cache_key(values: dict | None) -> str:
+        return json.dumps(values or {}, sort_keys=True, default=str)
+
+    def cache_get(self, values: dict | None) -> dict | None:
+        return self.param_cache.get(self._cache_key(values))
+
+    def cache_put(self, values: dict | None, entry: dict) -> None:
+        self.param_cache[self._cache_key(values)] = entry
+        if len(self.param_cache) > self._CACHE_CAP:
+            for old in list(self.param_cache)[: -self._CACHE_CAP]:
+                self.param_cache.pop(old, None)
+
+    def cache_clear(self) -> None:
+        self.param_cache.clear()
+
+    def serve_cached(self, values: dict | None) -> bool:
+        """If this param combo is cached, swap it in NOW (no build, no queue).
+        Call WITHOUT holding self.lock (set_model takes it)."""
+        hit = self.cache_get(values)
+        if hit is None:
+            return False
+        self.set_model(
+            hit["data"], hit["fmt"], obj=hit["obj"], node_names=hit["nodes"],
+            bbox=hit["bbox"], volume=hit["volume"], param_schema=hit["schema"],
+        )
+        return True
 
     # ---- version history (visual diff) ----------------------------------
     def model_at(self, version: int) -> tuple[bytes, str] | None:

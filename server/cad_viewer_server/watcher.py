@@ -44,6 +44,16 @@ def build_part(registry: Registry, ps: PartState) -> tuple[bool, str]:
     this directly on their own thread — `build_lock` keeps all of them serial.
     `mark_build_done` clears `building` and wakes anyone in `ensure_built`.
     """
+    # Instant path: this parameter combo was already built and cached.
+    hit = ps.cache_get(ps.param_values)
+    if hit is not None:
+        v = ps.set_model(
+            hit["data"], hit["fmt"], obj=hit["obj"], node_names=hit["nodes"],
+            bbox=hit["bbox"], volume=hit["volume"], param_schema=hit["schema"],
+        )
+        ps.mark_build_done()
+        return True, f"cached v{v}"
+
     with registry.build_lock:
         with ps.lock:
             ps.building = True
@@ -63,6 +73,11 @@ def build_part(registry: Registry, ps: PartState) -> tuple[bool, str]:
             ps.set_build_error(msg)
             ps.mark_build_done()
             return False, msg
+        ps.cache_put(ps.param_values, {
+            "data": res.model_bytes, "fmt": res.model_format, "obj": res.obj,
+            "nodes": res.node_names, "bbox": res.bbox, "volume": res.volume,
+            "schema": res.param_schema,
+        })
         v = ps.set_model(
             res.model_bytes,
             res.model_format,
@@ -170,6 +185,7 @@ class RootWatcher(threading.Thread):
                 # The part whose own file changed builds first (PRIO_EDIT);
                 # collateral siblings/shared rebuilds run in the background.
                 for ps in to_build:
+                    ps.cache_clear()  # source changed → all param combos stale
                     prio = (
                         PRIO_EDIT
                         if Path(ps.part_path) in changed

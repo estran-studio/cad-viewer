@@ -200,10 +200,14 @@ def create_app(registry: Registry) -> FastAPI:
             ps.param_values = {**ps.param_values, **values}
             new_values = dict(ps.param_values)
         registry.params.save(ps.part_id, new_values)
-        # rebuild with the new overrides (prioritized; non-blocking)
-        ensure_watcher(registry, ps)
-        registry.builder.request(ps, PRIO_INTERACTIVE)
-        return JSONResponse({"status": "ok", "part": ps.part_id, "values": new_values})
+        # Instant if this combo is already cached — bypass the build queue so a
+        # busy worker (mid slow build) doesn't delay the switch. Else enqueue.
+        cached = ps.serve_cached(new_values)
+        if not cached:
+            ensure_watcher(registry, ps)
+            registry.builder.request(ps, PRIO_INTERACTIVE)
+        return JSONResponse({"status": "ok", "part": ps.part_id,
+                             "values": new_values, "cached": cached})
 
     @app.post("/api/params/preset")
     async def api_param_preset(request: Request) -> JSONResponse:
@@ -225,8 +229,9 @@ def create_app(registry: Registry) -> FastAPI:
                 ps.param_values = dict(presets[name])
                 new_values = dict(ps.param_values)
             registry.params.save(ps.part_id, new_values)
-            ensure_watcher(registry, ps)
-            registry.builder.request(ps, PRIO_INTERACTIVE)
+            if not ps.serve_cached(new_values):
+                ensure_watcher(registry, ps)
+                registry.builder.request(ps, PRIO_INTERACTIVE)
         else:
             return JSONResponse({"error": "bad action/name"}, status_code=400)
         return JSONResponse({

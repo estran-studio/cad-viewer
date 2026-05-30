@@ -8,6 +8,7 @@ session manager running for the whole server lifetime — wired into lifespan.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -128,14 +129,24 @@ def create_app(registry: Registry) -> FastAPI:
         part: str = Form(...),
         note: str = Form(""),
         picked_node: str = Form(""),
+        picked_nodes: str = Form(""),  # JSON array of node names (multi-region)
         kind: str = Form("annotation"),
     ) -> JSONResponse:
         ps = registry.resolve(part)
         if ps is None:
             return JSONResponse({"error": "unknown part", "part": part}, status_code=404)
+        nodes: list[str] = []
+        if picked_nodes:
+            try:
+                parsed = json.loads(picked_nodes)
+                if isinstance(parsed, list):
+                    nodes = [str(n) for n in parsed if n]
+            except ValueError:
+                pass
         png = await image.read()
         fb = ps.add_feedback(
-            png=png, note=note, picked_node=picked_node or None, kind=kind
+            png=png, note=note, picked_node=picked_node or None, kind=kind,
+            picked_nodes=nodes or None,
         )
         return JSONResponse(
             {"status": "ok", "id": fb.id, "part": ps.part_id, "bytes": len(png)}

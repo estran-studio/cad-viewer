@@ -28,7 +28,8 @@ class Feedback:
     created_at: float
     png: bytes
     note: str = ""
-    picked_node: str | None = None
+    picked_node: str | None = None       # first picked node (back-compat)
+    picked_nodes: list[str] = field(default_factory=list)  # all circled regions
     model_version: int = 0
     kind: str = "annotation"  # "annotation" | "reference"
     part_id: str = ""
@@ -42,6 +43,7 @@ class Feedback:
             "has_note": bool(self.note),
             "note_preview": (self.note[:80] + "…") if len(self.note) > 80 else self.note,
             "picked_node": self.picked_node,
+            "picked_nodes": self.picked_nodes,
             "model_version": self.model_version,
             "kind": self.kind,
             "part_id": self.part_id,
@@ -233,15 +235,22 @@ class PartState:
 
     # ---- feedback --------------------------------------------------------
     def add_feedback(
-        self, png: bytes, note: str, picked_node: str | None, kind: str
+        self,
+        png: bytes,
+        note: str,
+        picked_node: str | None,
+        kind: str,
+        picked_nodes: list[str] | None = None,
     ) -> Feedback:
+        nodes = list(picked_nodes) if picked_nodes else ([picked_node] if picked_node else [])
         with self.lock:
             fb = Feedback(
                 id=next(self._ids),
                 created_at=time.time(),
                 png=png,
                 note=note or "",
-                picked_node=picked_node,
+                picked_node=nodes[0] if nodes else None,
+                picked_nodes=nodes,
                 model_version=self.version,
                 kind=kind or "annotation",
                 part_id=self.part_id,

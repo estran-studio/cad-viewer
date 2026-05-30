@@ -184,6 +184,7 @@ def build_mcp(registry: Registry) -> FastMCP:
             "kind": fb.kind,
             "note": fb.note,
             "picked_node": fb.picked_node,
+            "picked_nodes": fb.picked_nodes,
             "model_version": fb.model_version,
             "age_s": round(time.time() - fb.created_at, 1),
             "remaining_unconsumed": sum(

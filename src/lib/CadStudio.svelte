@@ -45,7 +45,7 @@
   let current: InkPoint[] = [];
   let inkColor = '#ff3b30';
   let note = '';
-  let pickedNode: string | null = null;
+  let pickedNodes: string[] = [];   // all nodes circled this annotation (multi-region)
   let bg: HTMLImageElement | null = null;
 
   // ---- reference library (server-persisted, per part) ----
@@ -53,6 +53,11 @@
   let refs: RefInfo[] = [];
   let lastRefBlob: Blob | null = null; // a freshly loaded ref not yet kept
   let keeping = false;
+  // ---- reference compare dock (ref shown beside/under the live viewer) ----
+  let compareRef: { src: string; label: string; id: number | null } | null = null;
+  let refImg: HTMLImageElement | null = null; // decoded ref, for canvas compositing
+  let viewerPaneEl: HTMLElement;
+  let refDockEl: HTMLElement;
 
   let wsState: 'connecting' | 'live' | 'down' = 'connecting';
   let version = 0;
@@ -330,11 +335,36 @@
     redraw();
   }
 
+  // Draw `img` contained (letterboxed) inside a rect — preserves aspect.
+  function drawContain(img: HTMLImageElement, x: number, y: number, w: number, h: number) {
+    const iw = img.naturalWidth || img.width, ih = img.naturalHeight || img.height;
+    if (!iw || !ih) return;
+    const s = Math.min(w / iw, h / ih);
+    const dw = iw * s, dh = ih * s;
+    ctx!.drawImage(img, x + (w - dw) / 2, y + (h - dh) / 2, dw, dh);
+  }
+
   function redraw() {
     if (!ctx) return;
     const { width, height } = overlay;
     ctx.clearRect(0, 0, width, height);
-    if (bg) ctx.drawImage(bg, 0, 0, width, height);
+    // Frozen composite (only in draw mode, when bg = viewer snapshot is set).
+    // In nav mode the live <cad-viewer> + the dock <img> show through.
+    if (bg) {
+      if (compareRef && refImg && viewerPaneEl && refDockEl && mainEl) {
+        // split: snapshot in the viewer-pane rect, reference in the dock rect
+        const m = mainEl.getBoundingClientRect();
+        const sx = overlay.width / m.width, sy = overlay.height / m.height;
+        const vp = viewerPaneEl.getBoundingClientRect();
+        const dk = refDockEl.getBoundingClientRect();
+        ctx.drawImage(bg, (vp.left - m.left) * sx, (vp.top - m.top) * sy,
+                      vp.width * sx, vp.height * sy);
+        drawContain(refImg, (dk.left - m.left) * sx, (dk.top - m.top) * sy,
+                    dk.width * sx, dk.height * sy);
+      } else {
+        ctx.drawImage(bg, 0, 0, width, height);
+      }
+    }
     const dpr = Math.min(window.devicePixelRatio || 1, 2);
     ctx.save();
     ctx.scale(dpr, dpr);
@@ -362,7 +392,7 @@
     }
     strokes = [];
     current = [];
-    pickedNode = null;
+    pickedNodes = [];
     mode = 'draw';
     viewerEl?.setNavigationEnabled?.(false);
   }
@@ -372,9 +402,10 @@
     bg = null;
     strokes = [];
     current = [];
+    pickedNodes = [];
     kind = 'annotation';
     viewerEl?.setNavigationEnabled?.(true);
-    redraw();
+    redraw();  // keep compareRef dock so the user can keep iterating
   }
 
   function undo() { strokes = strokes.slice(0, -1); redraw(); }
@@ -386,9 +417,12 @@
     e.preventDefault();
     overlay.setPointerCapture(e.pointerId);
     current = [{ x: e.offsetX, y: e.offsetY, pressure: pressureOf(e) }];
-    if (pickedNode == null && kind === 'annotation') {
-      try { pickedNode = viewerEl?.pickNodeAt?.(e.clientX, e.clientY) ?? null; }
-      catch { pickedNode = null; }
+    // multi-region: pick the node under each stroke start, accumulate (dedup).
+    if (kind === 'annotation') {
+      try {
+        const n = viewerEl?.pickNodeAt?.(e.clientX, e.clientY) ?? null;
+        if (n && !pickedNodes.includes(n)) pickedNodes = [...pickedNodes, n];
+      } catch { /* over the ref dock / empty space → no node */ }
     }
     redraw();
   }
@@ -423,20 +457,25 @@
     if (f) loadReference(f);
   }
 
-  function loadReference(file: Blob) {
-    lastRefBlob = file; // newly loaded, not yet in the library → offer "Garder"
+  // Dock a reference beside/under the live viewer (compare mode). The model
+  // stays interactive; "✏️ Annoter" then freezes and lets you draw across both.
+  function openCompare(src: string, label: string, id: number | null, blob: Blob | null) {
+    lastRefBlob = blob;
+    compareRef = { src, label, id };
     const img = new Image();
-    img.onload = () => {
-      bg = img;
-      strokes = [];
-      current = [];
-      pickedNode = null;
-      kind = 'reference';
-      mode = 'draw';
-      viewerEl?.setNavigationEnabled?.(false);
-      redraw();
-    };
-    img.src = URL.createObjectURL(file);
+    img.onload = () => { refImg = img; redraw(); };
+    img.src = src;
+  }
+
+  function closeCompare() {
+    compareRef = null;
+    refImg = null;
+    lastRefBlob = null;
+    if (mode === 'draw') exitDraw(); else redraw();
+  }
+
+  function loadReference(file: Blob) {
+    openCompare(URL.createObjectURL(file), '', null, file);
   }
 
   // ---- reference library ----------------------------------------------
@@ -453,19 +492,7 @@
   }
 
   function loadReferenceFromLibrary(rf: RefInfo) {
-    lastRefBlob = null; // already persisted → no "Garder"
-    const img = new Image();
-    img.onload = () => {
-      bg = img;
-      strokes = [];
-      current = [];
-      pickedNode = null;
-      kind = 'reference';
-      mode = 'draw';
-      viewerEl?.setNavigationEnabled?.(false);
-      redraw();
-    };
-    img.src = `${apiBase}${rf.url}`;
+    openCompare(`${apiBase}${rf.url}`, rf.label, rf.id, null);
   }
 
   async function keepReference() {
@@ -477,7 +504,9 @@
       fd.append('part', currentPartId);
       const r = await fetch(`${apiBase}/api/references`, { method: 'POST', body: fd });
       if (!r.ok) throw new Error('HTTP ' + r.status);
+      const rec = await r.json();
       lastRefBlob = null;
+      if (compareRef) compareRef = { ...compareRef, id: rec.id }; // now persisted
       await refreshRefs();
       showToast('📌 Référence gardée');
     } catch (e) { showToast('✗ ' + (e as Error).message); }
@@ -508,7 +537,8 @@
       fd.append('image', blob, 'feedback.png');
       fd.append('part', currentPartId);
       fd.append('note', note);
-      fd.append('picked_node', pickedNode || '');
+      fd.append('picked_node', pickedNodes[0] || '');
+      fd.append('picked_nodes', JSON.stringify(pickedNodes));
       fd.append('kind', kind);
       const r = await fetch(`${apiBase}/api/feedback`, { method: 'POST', body: fd });
       if (!r.ok) throw new Error('HTTP ' + r.status);
@@ -621,7 +651,7 @@
           {/if}
           {#each refs as rf (rf.id)}
             <div class="ref-card">
-              <button class="ref-thumb" on:click={() => loadReferenceFromLibrary(rf)} title="Annoter sur cette référence">
+              <button class="ref-thumb" on:click={() => loadReferenceFromLibrary(rf)} title="Comparer / annoter avec cette référence">
                 <img src={`${apiBase}${rf.url}`} alt={rf.label || ('réf ' + rf.id)} />
               </button>
               <div class="ref-meta">
@@ -636,13 +666,28 @@
     {/if}
   </aside>
 
-  <!-- main: the viewer pane (cad-viewer keeps its own toolbar/gizmo here) -->
-  <main class="main" bind:this={mainEl}>
-    <cad-viewer
-      bind:this={viewerEl}
-      viewerBackgroundColor={viewerBackgroundColor}
-      persistenceId="cad-studio"
-    ></cad-viewer>
+  <!-- main: viewer pane (+ optional reference dock for compare/annotate) -->
+  <main class="main" bind:this={mainEl} class:has-dock={!!compareRef}>
+    <div class="viewer-pane" bind:this={viewerPaneEl}>
+      <cad-viewer
+        bind:this={viewerEl}
+        viewerBackgroundColor={viewerBackgroundColor}
+        persistenceId="cad-studio"
+      ></cad-viewer>
+    </div>
+
+    {#if compareRef}
+      <div class="ref-dock" bind:this={refDockEl}>
+        <img class="ref-dock-img" src={compareRef.src} alt={compareRef.label || 'référence'} on:load={redraw} />
+        <div class="ref-dock-bar">
+          <span class="ref-dock-label">{compareRef.label || 'référence'}</span>
+          {#if compareRef.id == null}
+            <button class="dock-keep" on:click={keepReference} disabled={keeping}>{keeping ? '…' : '📌 Garder'}</button>
+          {/if}
+          <button class="dock-close" aria-label="fermer la référence" on:click={closeCompare}>✕</button>
+        </div>
+      </div>
+    {/if}
 
     <canvas
       class="overlay"
@@ -673,9 +718,6 @@
         </div>
         <button on:click={undo} disabled={strokes.length === 0}>↶ Annuler</button>
         <button on:click={clearInk} disabled={strokes.length === 0}>Effacer</button>
-        {#if kind === 'reference' && lastRefBlob}
-          <button on:click={keepReference} disabled={keeping}>{keeping ? '…' : '📌 Garder'}</button>
-        {/if}
         <input class="note" placeholder="Note pour Claude (ex: +2mm ce trou)" bind:value={note} />
         <button class="primary" on:click={send} disabled={sending}>{sending ? '…' : '➤ Envoyer'}</button>
         <button on:click={exitDraw}>✕</button>
@@ -690,8 +732,9 @@
     <span class="dot {wsState}"></span>
     <span>{wsState === 'live' ? `live · v${version}` : wsState === 'connecting' ? 'connexion…' : 'hors-ligne'}</span>
     {#if currentPartId}<span class="sb-sep">·</span><span>{shortName(currentPartId)}</span>{/if}
-    {#if kind === 'reference'}<span class="sb-sep">·</span><span>réf</span>{/if}
-    {#if pickedNode}<span class="sb-sep">·</span><span>⌖ {pickedNode}</span>{/if}
+    {#if compareRef}<span class="sb-sep">·</span><span>réf</span>{/if}
+    {#if pickedNodes.length === 1}<span class="sb-sep">·</span><span>⌖ {pickedNodes[0]}</span>
+    {:else if pickedNodes.length > 1}<span class="sb-sep">·</span><span>⌖ {pickedNodes.length} zones</span>{/if}
     <span class="sb-spacer"></span>
     <button class="sb-toggle" title="Basculer la sidebar" on:click={() => { sidebarOpen = !sidebarOpen; saveStudioState(); }}>
       {sidebarOpen ? '◧' : '▢'} panneau
@@ -834,9 +877,34 @@
 
   /* main viewer pane — cad-viewer + its own toolbar/gizmo live here */
   .main { grid-area: main; position: relative; min-width: 0; overflow: hidden; }
+  .viewer-pane { position: absolute; inset: 0; }
   cad-viewer { position: absolute; inset: 0; width: 100%; height: 100%; display: block; }
-  .overlay { position: absolute; inset: 0; touch-action: none; pointer-events: none; }
+  /* overlay spans the WHOLE main (viewer + dock) so a stroke crosses both */
+  .overlay { position: absolute; inset: 0; touch-action: none; pointer-events: none; z-index: 5; }
   .overlay.active { pointer-events: auto; cursor: crosshair; }
+
+  /* reference compare dock: side in landscape, bottom in portrait */
+  .main.has-dock { display: grid; }
+  @media (orientation: landscape) {
+    .main.has-dock { grid-template-columns: 1fr minmax(220px, 38%); grid-template-rows: 100%; }
+  }
+  @media (orientation: portrait) {
+    .main.has-dock { grid-template-rows: 1fr minmax(160px, 42%); grid-template-columns: 100%; }
+  }
+  .main.has-dock .viewer-pane { position: relative; inset: auto; }
+  .ref-dock { position: relative; overflow: hidden; background: #0d0d0f;
+    border-left: 1px solid #2c2c2e; }
+  @media (orientation: portrait) {
+    .ref-dock { border-left: none; border-top: 1px solid #2c2c2e; }
+  }
+  .ref-dock-img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: contain; }
+  .ref-dock-bar { position: absolute; left: 0; right: 0; bottom: 0; z-index: 6;
+    display: flex; align-items: center; gap: 8px; padding: 5px 8px;
+    background: rgba(16,16,18,0.72); font-size: 12px; color: #cfcfd2; }
+  .ref-dock-label { flex: 1 1 auto; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .dock-keep, .dock-close { background: rgba(255,255,255,0.16); color: #fff; border: none;
+    border-radius: 6px; padding: 5px 10px; font-size: 12px; cursor: pointer; }
+  .dock-keep:hover, .dock-close:hover { background: rgba(255,255,255,0.3); }
 
   .spinner {
     position: absolute; top: 50%; left: 50%; transform: translate(-50%,-50%);

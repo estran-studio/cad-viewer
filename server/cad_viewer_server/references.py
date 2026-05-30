@@ -115,6 +115,17 @@ class ReferenceStore:
                 pass
             return True
 
+    def set_calibration(self, part_id: str, ref_id: int, px_per_mm: float) -> bool:
+        """Store a scale (pixels of the natural image per millimetre) on a ref."""
+        with self._lock:
+            items = self._load_index(part_id)
+            for i in items:
+                if i["id"] == int(ref_id):
+                    i["px_per_mm"] = float(px_per_mm)
+                    self._save_index(part_id, items)
+                    return True
+            return False
+
     def set_note(self, part_id: str, ref_id: int, note: str) -> bool:
         with self._lock:
             items = self._load_index(part_id)

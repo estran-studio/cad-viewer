@@ -250,6 +250,20 @@ def create_app(registry: Registry) -> FastAPI:
         rec = registry.references.add(ps.part_id, png, label=label, note=note)
         return JSONResponse({"status": "ok", "part": ps.part_id, **rec})
 
+    @app.post("/api/references/calibration")
+    async def api_reference_calibration(request: Request) -> JSONResponse:
+        body = await request.json()
+        ps = registry.resolve(body.get("part"))
+        if ps is None:
+            return JSONResponse({"error": "unknown part"}, status_code=404)
+        try:
+            ref_id = int(body.get("id"))
+            ppm = float(body.get("px_per_mm"))
+        except (TypeError, ValueError):
+            return JSONResponse({"error": "bad id/px_per_mm"}, status_code=400)
+        ok = registry.references.set_calibration(ps.part_id, ref_id, ppm)
+        return JSONResponse({"status": "ok" if ok else "not_found", "id": ref_id, "px_per_mm": ppm})
+
     @app.delete("/api/references")
     async def api_reference_delete(part: str = Form(...), id: int = Form(...)) -> JSONResponse:
         ps = registry.resolve(part)

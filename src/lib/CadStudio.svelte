@@ -54,10 +54,14 @@
   let lastRefBlob: Blob | null = null; // a freshly loaded ref not yet kept
   let keeping = false;
   // ---- reference compare dock (ref shown beside/under the live viewer) ----
-  let compareRef: { src: string; label: string; id: number | null } | null = null;
+  let compareRef: { src: string; label: string; id: number | null; pxPerMm?: number } | null = null;
   let refImg: HTMLImageElement | null = null; // decoded ref, for canvas compositing
   let viewerPaneEl: HTMLElement;
   let refDockEl: HTMLElement;
+  // ---- ref calibration / measure (px ↔ mm on the reference) ----
+  let measuring = false;
+  let measurePts: { x: number; y: number }[] = []; // overlay CSS px, ≤2
+  let pendingMm = '';
 
   // ---- parameters (cad_viewer.params → ⚙️ panel) ----
   interface ParamDef { name: string; type: 'num' | 'bool' | 'enum'; default: any; label: string; min?: number; max?: number; step?: number; options?: string[]; }
@@ -387,6 +391,23 @@
       ctx.fillStyle = inkColor;
       ctx.fill(strokeToPath2D(current));
     }
+    // measurement ruler on the reference
+    if (measuring && measurePts.length) {
+      ctx.fillStyle = '#ffd60a';
+      ctx.strokeStyle = '#ffd60a';
+      ctx.lineWidth = 2;
+      for (const p of measurePts) { ctx.beginPath(); ctx.arc(p.x, p.y, 4, 0, 7); ctx.fill(); }
+      if (measurePts.length === 2) {
+        const [a, b] = measurePts;
+        ctx.beginPath(); ctx.moveTo(a.x, a.y); ctx.lineTo(b.x, b.y); ctx.stroke();
+        const mm = compareRef?.pxPerMm ? measureNaturalDist() / compareRef.pxPerMm : null;
+        const lbl = mm != null ? mm.toFixed(1) + ' mm' : '= ? mm';
+        const mx = (a.x + b.x) / 2, my = (a.y + b.y) / 2 - 8;
+        ctx.font = 'bold 13px -apple-system, sans-serif';
+        ctx.lineWidth = 3; ctx.strokeStyle = 'rgba(0,0,0,0.8)';
+        ctx.strokeText(lbl, mx, my); ctx.fillText(lbl, mx, my);
+      }
+    }
     ctx.restore();
   }
 
@@ -424,6 +445,17 @@
 
   // ---- pointer (stylus) ------------------------------------------------
   function onPointerDown(e: PointerEvent) {
+    if (measuring) {
+      e.preventDefault();
+      const r = refRect();
+      const x = e.offsetX, y = e.offsetY;
+      if (r && x >= r.cx && x <= r.cx + r.cw && y >= r.cy && y <= r.cy + r.ch) {
+        if (measurePts.length >= 2) measurePts = [];
+        measurePts = [...measurePts, { x, y }];
+        redraw();
+      }
+      return;
+    }
     if (mode !== 'draw') return;
     e.preventDefault();
     overlay.setPointerCapture(e.pointerId);
@@ -470,9 +502,10 @@
 
   // Dock a reference beside/under the live viewer (compare mode). The model
   // stays interactive; "✏️ Annoter" then freezes and lets you draw across both.
-  function openCompare(src: string, label: string, id: number | null, blob: Blob | null) {
+  function openCompare(src: string, label: string, id: number | null, blob: Blob | null, pxPerMm?: number) {
     lastRefBlob = blob;
-    compareRef = { src, label, id };
+    compareRef = { src, label, id, pxPerMm };
+    measuring = false; measurePts = []; pendingMm = '';
     const img = new Image();
     img.onload = () => { refImg = img; redraw(); };
     img.src = src;
@@ -482,11 +515,63 @@
     compareRef = null;
     refImg = null;
     lastRefBlob = null;
+    measuring = false; measurePts = [];
     if (mode === 'draw') exitDraw(); else redraw();
   }
 
   function loadReference(file: Blob) {
     openCompare(URL.createObjectURL(file), '', null, file);
+  }
+
+  // ---- ref calibration / measurement ----------------------------------
+  // Geometry of the reference image inside the overlay (CSS px). The image is
+  // object-fit:contain in the dock; we work in the image's natural pixels so a
+  // calibration (px/mm) is stable across dock resizes / orientation.
+  function refRect() {
+    if (!refImg || !compareRef || !refDockEl || !mainEl) return null;
+    const m = mainEl.getBoundingClientRect();
+    const dk = refDockEl.getBoundingClientRect();
+    const iw = refImg.naturalWidth, ih = refImg.naturalHeight;
+    if (!iw || !ih || !dk.width || !dk.height) return null;
+    const s = Math.min(dk.width / iw, dk.height / ih); // CSS px per natural px
+    const cw = iw * s, ch = ih * s;
+    return {
+      cx: (dk.left - m.left) + (dk.width - cw) / 2,
+      cy: (dk.top - m.top) + (dk.height - ch) / 2,
+      cw, ch, s,
+    };
+  }
+
+  function measureNaturalDist(): number {
+    const r = refRect();
+    if (!r || measurePts.length < 2) return 0;
+    const [a, b] = measurePts;
+    return Math.hypot((b.x - a.x) / r.s, (b.y - a.y) / r.s);
+  }
+
+  $: measuredMm = (compareRef?.pxPerMm && measurePts.length === 2)
+    ? measureNaturalDist() / compareRef.pxPerMm : null;
+
+  function toggleMeasure() {
+    measuring = !measuring;
+    measurePts = []; pendingMm = '';
+    viewerEl?.setNavigationEnabled?.(!measuring);
+    redraw();
+  }
+
+  function confirmCalibration() {
+    const mm = parseFloat(pendingMm);
+    if (!compareRef || measurePts.length < 2 || !(mm > 0)) return;
+    const ppm = measureNaturalDist() / mm;
+    compareRef = { ...compareRef, pxPerMm: ppm };
+    pendingMm = '';
+    if (compareRef.id != null && currentPartId) {
+      fetch(`${apiBase}/api/references/calibration`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ part: currentPartId, id: compareRef.id, px_per_mm: ppm }),
+      }).catch(() => { /* */ });
+    }
+    redraw();
   }
 
   // ---- reference library ----------------------------------------------
@@ -503,7 +588,7 @@
   }
 
   function loadReferenceFromLibrary(rf: RefInfo) {
-    openCompare(`${apiBase}${rf.url}`, rf.label, rf.id, null);
+    openCompare(`${apiBase}${rf.url}`, rf.label, rf.id, null, (rf as any).px_per_mm);
   }
 
   // ---- parameters ------------------------------------------------------
@@ -780,10 +865,24 @@
       <div class="ref-dock" bind:this={refDockEl}>
         <img class="ref-dock-img" src={compareRef.src} alt={compareRef.label || 'référence'} on:load={redraw} />
         <div class="ref-dock-bar">
-          <span class="ref-dock-label">{compareRef.label || 'référence'}</span>
-          {#if compareRef.id == null}
-            <button class="dock-keep" on:click={keepReference} disabled={keeping}>{keeping ? '…' : '📌 Garder'}</button>
+          {#if measuring}
+            {#if measurePts.length === 2 && !compareRef.pxPerMm}
+              <input class="cal-mm" placeholder="longueur réelle (mm)" bind:value={pendingMm}
+                on:keydown={(e) => { if (e.key === 'Enter') confirmCalibration(); }} />
+              <button class="dock-keep" on:click={confirmCalibration}>✓ calibrer</button>
+            {:else if compareRef.pxPerMm}
+              <span class="ref-dock-label">{measuredMm != null ? measuredMm.toFixed(1) + ' mm' : 'échelle ✓ — trace pour mesurer'}</span>
+              <button class="dock-keep" on:click={() => { if (compareRef) compareRef = { ...compareRef, pxPerMm: undefined }; measurePts = []; redraw(); }}>recalibrer</button>
+            {:else}
+              <span class="ref-dock-label">trace une ligne de longueur connue</span>
+            {/if}
+          {:else}
+            <span class="ref-dock-label">{compareRef.label || 'référence'}</span>
+            {#if compareRef.id == null}
+              <button class="dock-keep" on:click={keepReference} disabled={keeping}>{keeping ? '…' : '📌 Garder'}</button>
+            {/if}
           {/if}
+          <button class="dock-keep" class:on={measuring} title="Mesurer / calibrer" on:click={toggleMeasure}>📏{#if compareRef.pxPerMm && !measuring}<span class="cal-dot"></span>{/if}</button>
           <button class="dock-close" aria-label="fermer la référence" on:click={closeCompare}>✕</button>
         </div>
       </div>
@@ -791,7 +890,7 @@
 
     <canvas
       class="overlay"
-      class:active={mode === 'draw'}
+      class:active={mode === 'draw' || measuring}
       bind:this={overlay}
       on:pointerdown={onPointerDown}
       on:pointermove={onPointerMove}
@@ -1034,8 +1133,14 @@
     background: rgba(16,16,18,0.72); font-size: 12px; color: #cfcfd2; }
   .ref-dock-label { flex: 1 1 auto; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .dock-keep, .dock-close { background: rgba(255,255,255,0.16); color: #fff; border: none;
-    border-radius: 6px; padding: 5px 10px; font-size: 12px; cursor: pointer; }
+    border-radius: 6px; padding: 5px 10px; font-size: 12px; cursor: pointer; position: relative; }
   .dock-keep:hover, .dock-close:hover { background: rgba(255,255,255,0.3); }
+  .dock-keep.on { background: #ffd60a; color: #1a1a1c; }
+  .cal-mm { width: 130px; background: rgba(0,0,0,0.4); color: #fff;
+    border: 1px solid rgba(255,255,255,0.3); border-radius: 6px; padding: 5px 8px;
+    font-size: 12px; font-family: inherit; }
+  .cal-dot { position: absolute; top: 2px; right: 2px; width: 6px; height: 6px;
+    border-radius: 50%; background: #30d158; }
 
   .spinner {
     position: absolute; top: 50%; left: 50%; transform: translate(-50%,-50%);

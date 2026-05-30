@@ -22,8 +22,13 @@ import importlib.util
 import sys
 import tempfile
 import traceback
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
+
+try:  # part-facing helper, shipped in this wheel; tolerate absence
+    from cad_viewer import params as _params
+except Exception:  # noqa: BLE001
+    _params = None
 
 
 @contextlib.contextmanager
@@ -50,6 +55,7 @@ class LoadResult:
     node_names: list[str]
     bbox: dict | None
     volume: float | None
+    param_schema: list = field(default_factory=list)
 
 
 class PartError(Exception):
@@ -177,13 +183,29 @@ def _to_web_bytes(obj: Shape) -> tuple[bytes, str]:
         return stl.read_bytes(), "stl"
 
 
-def load_part(file_path: Path, project_root: Path | None) -> LoadResult:
-    """Import the part file, return geometry + web-ready bytes. Raises PartError."""
+def load_part(
+    file_path: Path,
+    project_root: Path | None,
+    overrides: dict | None = None,
+) -> LoadResult:
+    """Import the part file, return geometry + web-ready bytes. Raises PartError.
+
+    `overrides` are the current parameter values fed to `cad_viewer.params`
+    helpers the part may call; the schema they declare is read back into
+    `LoadResult.param_schema`.
+    """
     if not file_path.exists():
         raise PartError(f"Part file does not exist: {file_path}")
+    schema: list = []
     with quiet_stdout():
-        module = _import_part(file_path, project_root)
-        var_name, obj = _extract_shape(module, file_path)
+        if _params is not None:
+            _params._begin(overrides)
+        try:
+            module = _import_part(file_path, project_root)
+            var_name, obj = _extract_shape(module, file_path)
+        finally:
+            if _params is not None:
+                schema = _params._end()
         data, fmt = _to_web_bytes(obj)
         bbox, volume = _geometry_stats(obj)
     return LoadResult(
@@ -193,6 +215,7 @@ def load_part(file_path: Path, project_root: Path | None) -> LoadResult:
         node_names=_node_names(obj),
         bbox=bbox,
         volume=volume,
+        param_schema=schema,
     )
 
 

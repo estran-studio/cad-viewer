@@ -28,6 +28,12 @@ parts = [
     "stealth_scout.py",
 ]
 
+# Démo paramétrique (livrée avec cad-viewer) — montre le panneau ⚙️ Paramètres.
+[[project]]
+name = "examples"
+root = "/Users/wq/Project/bascanada/cad-viewer/examples"
+parts = ["param_demo.py"]
+
 [[project]]
 name = "my_fleet"
 root = "/Users/wq/Project/bascanada/my_fleet/cad"

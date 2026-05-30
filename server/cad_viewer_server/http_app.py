@@ -14,7 +14,7 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from urllib.parse import quote
 
-from fastapi import FastAPI, Form, UploadFile, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, Form, Request, UploadFile, WebSocket, WebSocketDisconnect
 from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import HTMLResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
@@ -151,6 +151,37 @@ def create_app(registry: Registry) -> FastAPI:
         return JSONResponse(
             {"status": "ok", "id": fb.id, "part": ps.part_id, "bytes": len(png)}
         )
+
+    # ---- parameters (cad_viewer.params) ---------------------------------
+    @app.get("/api/params")
+    async def api_params(part: str | None = None) -> JSONResponse:
+        ps = _resolve_or_404(part)
+        if ps is None:
+            return JSONResponse({"error": "unknown part", "part": part}, status_code=404)
+        st = ps.status()
+        return JSONResponse({
+            "part_id": ps.part_id,
+            "schema": st["param_schema"],
+            "values": st["param_values"],
+        })
+
+    @app.post("/api/params")
+    async def api_set_params(request: Request) -> JSONResponse:
+        body = await request.json()
+        ps = registry.resolve(body.get("part"))
+        if ps is None:
+            return JSONResponse({"error": "unknown part"}, status_code=404)
+        values = body.get("values")
+        if not isinstance(values, dict):
+            return JSONResponse({"error": "values must be an object"}, status_code=400)
+        with ps.lock:
+            ps.param_values = {**ps.param_values, **values}
+            new_values = dict(ps.param_values)
+        registry.params.save(ps.part_id, new_values)
+        # rebuild with the new overrides (prioritized; non-blocking)
+        ensure_watcher(registry, ps)
+        registry.builder.request(ps, PRIO_INTERACTIVE)
+        return JSONResponse({"status": "ok", "part": ps.part_id, "values": new_values})
 
     # ---- reference library (disk-persisted, per part) -------------------
     @app.get("/api/references")

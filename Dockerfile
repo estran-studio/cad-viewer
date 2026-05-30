@@ -38,8 +38,10 @@ COPY server/pyproject.toml server/uv.lock ./server/
 RUN cd server && uv sync --frozen --no-install-project
 
 # 2) copy the server source and finish the sync (installs the project itself,
-#    exposing the `cad-viewer-serve` console script)
+#    exposing the `cad-viewer-serve` console script). cad_viewer/ is the
+#    part-facing helper package (`from cad_viewer import params`).
 COPY server/cad_viewer_server ./server/cad_viewer_server
+COPY server/cad_viewer ./server/cad_viewer
 RUN cd server && uv sync --frozen
 
 # 3) bring in the pre-built frontend (served as /dist by the FastAPI app)

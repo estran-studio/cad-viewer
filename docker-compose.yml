@@ -25,6 +25,8 @@ services:
       # Bind-mount au MÊME chemin host = container → le cad-viewer.toml
       # (root = /Users/wq/...) marche pareil pour `make serve` et Docker.
       - /Users/wq/Project/bascanada/my_fleet/cad:/Users/wq/Project/bascanada/my_fleet/cad:ro
+      # Pièces de démo livrées avec cad-viewer (même chemin host=container).
+      - /Users/wq/Project/bascanada/cad-viewer/examples:/Users/wq/Project/bascanada/cad-viewer/examples:ro
       # Le fichier de config monté en lecture seule.
       - ./cad-viewer.toml:/app/cad-viewer.toml:ro
       # Données persistantes (bibliothèque d'images de référence) — survit aux

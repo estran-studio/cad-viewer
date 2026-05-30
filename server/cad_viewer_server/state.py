@@ -126,6 +126,10 @@ class PartState:
     opened_at: float = 0.0       # when it became a tab (stable tab order)
     last_active_at: float = 0.0  # last time it was selected (recents order)
 
+    # ---- parameters (cad_viewer.params) ----------------------------------
+    param_schema: list = field(default_factory=list)   # declared by the part
+    param_values: dict = field(default_factory=dict)   # current overrides
+
     # ---- build queue bookkeeping (see builder.BuildQueue) ----------------
     build_requested_at: float = 0.0   # when it was enqueued while not building
     build_started_at: float = 0.0     # when the worker actually started it
@@ -148,6 +152,7 @@ class PartState:
         node_names: list[str],
         bbox: dict | None,
         volume: float | None,
+        param_schema: list | None = None,
     ) -> int:
         with self.lock:
             self.model_bytes = data
@@ -160,6 +165,13 @@ class PartState:
             self.volume = volume
             self.last_obj = obj
             self.loaded = True
+            if param_schema is not None:
+                self.param_schema = param_schema
+                # drop overrides that no longer correspond to a declared param
+                names = {p.get("name") for p in param_schema}
+                self.param_values = {
+                    k: v for k, v in self.param_values.items() if k in names
+                }
             v = self.version
         log.info(
             "[%s] model v%d (%s, %d bytes, %d nodes)",
@@ -227,6 +239,8 @@ class PartState:
                 "node_names": self.node_names,
                 "bbox": self.bbox,
                 "volume": self.volume,
+                "param_schema": self.param_schema,
+                "param_values": self.param_values,
                 "has_model": self.model_bytes is not None,
                 "pending_feedback": sum(
                     1 for f in self.feedback_queue if not f.consumed
@@ -305,6 +319,10 @@ class Registry:
         from .references import ReferenceStore
 
         self.references = ReferenceStore()
+        # Disk-persisted, per-part parameter overrides.
+        from .paramstore import ParamStore
+
+        self.params = ParamStore()
 
     def bind_loop(self, loop: asyncio.AbstractEventLoop) -> None:
         self.hub.bind_loop(loop)
@@ -323,6 +341,7 @@ class Registry:
                 else None,
                 hub=self.hub,
             )
+            ps.param_values = self.params.load(part_id)  # restore saved overrides
             self.parts[part_id] = ps
             return ps
 

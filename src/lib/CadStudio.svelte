@@ -59,6 +59,12 @@
   let viewerPaneEl: HTMLElement;
   let refDockEl: HTMLElement;
 
+  // ---- parameters (cad_viewer.params → ⚙️ panel) ----
+  interface ParamDef { name: string; type: 'num' | 'bool' | 'enum'; default: any; label: string; min?: number; max?: number; step?: number; options?: string[]; }
+  let paramSchema: ParamDef[] = [];
+  let paramValues: Record<string, any> = {};
+  let paramTimer: any = null;
+
   let wsState: 'connecting' | 'live' | 'down' = 'connecting';
   let version = 0;
   let toast = '';
@@ -102,6 +108,7 @@
     if (sidebarOpen && activeView === v) sidebarOpen = false;
     else { activeView = v; sidebarOpen = true; }
     if (v === 'refs') refreshRefs();
+    if (v === 'params') refreshParams();
     saveStudioState();
   }
 
@@ -239,6 +246,7 @@
     loadModel({ isSwitch: true });
     wsSubscribe();
     refreshRefs();
+    refreshParams();
   }
 
   function closeTab(id: string) {
@@ -285,6 +293,7 @@
           // a switch in flight.
           loadModel({ version });
           refreshParts();
+          if (activeView === 'params') refreshParams();
         } else if (msg.type === 'build_error') {
           building = false;
           showToast('⚠ build123d a échoué — voir le terminal');
@@ -495,6 +504,36 @@
     openCompare(`${apiBase}${rf.url}`, rf.label, rf.id, null);
   }
 
+  // ---- parameters ------------------------------------------------------
+  async function refreshParams() {
+    if (!currentPartId) { paramSchema = []; paramValues = {}; return; }
+    try {
+      const r = await fetch(
+        `${apiBase}/api/params?part=${encodeURIComponent(currentPartId)}`,
+        { cache: 'no-store' }
+      );
+      const j = await r.json();
+      paramSchema = j.schema || [];
+      // start from declared defaults, overlay saved values
+      const v: Record<string, any> = {};
+      for (const p of paramSchema) v[p.name] = p.default;
+      paramValues = { ...v, ...(j.values || {}) };
+    } catch { /* keep last */ }
+  }
+
+  function setParam(name: string, value: any) {
+    paramValues = { ...paramValues, [name]: value };
+    clearTimeout(paramTimer);
+    paramTimer = setTimeout(() => {
+      if (!currentPartId) return;
+      fetch(`${apiBase}/api/params`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ part: currentPartId, values: paramValues }),
+      }).catch(() => { /* WS reload will catch up */ });
+    }, 300);
+  }
+
   async function keepReference() {
     if (!lastRefBlob || !currentPartId || keeping) return;
     keeping = true;
@@ -634,8 +673,39 @@
         {/each}
       </div>
     {:else if activeView === 'params'}
-      <div class="side-head">Paramètres</div>
-      <div class="side-empty">Bientôt — sliders &amp; toggles des modèles paramétriques (phase 3).</div>
+      <div class="side-head">Paramètres{#if paramSchema.length} · {currentPartId ? shortName(currentPartId) : ''}{/if}</div>
+      <div class="side-scroll">
+        {#if !currentPartId}
+          <div class="side-empty">Sélectionne une pièce.</div>
+        {:else if !paramSchema.length}
+          <div class="side-empty">Cette pièce n'expose aucun paramètre. Dans son .py : <code>from cad_viewer import params</code> puis <code>params.num(…)</code> / <code>params.flag(…)</code> / <code>params.choice(…)</code>.</div>
+        {:else}
+          {#each paramSchema as p (p.name)}
+            <div class="param">
+              <div class="param-label">
+                <span>{p.label}</span>
+                {#if p.type === 'num'}<span class="param-val">{paramValues[p.name]}</span>{/if}
+              </div>
+              {#if p.type === 'num'}
+                <input type="range" min={p.min ?? 0} max={p.max ?? 100} step={p.step ?? 1}
+                  value={paramValues[p.name]}
+                  on:input={(e) => setParam(p.name, Number((e.target as HTMLInputElement).value))} />
+              {:else if p.type === 'bool'}
+                <label class="param-check">
+                  <input type="checkbox" checked={!!paramValues[p.name]}
+                    on:change={(e) => setParam(p.name, (e.target as HTMLInputElement).checked)} />
+                  <span>{paramValues[p.name] ? 'activé' : 'désactivé'}</span>
+                </label>
+              {:else if p.type === 'enum'}
+                <select value={paramValues[p.name]}
+                  on:change={(e) => setParam(p.name, (e.target as HTMLSelectElement).value)}>
+                  {#each (p.options || []) as opt}<option value={opt}>{opt}</option>{/each}
+                </select>
+              {/if}
+            </div>
+          {/each}
+        {/if}
+      </div>
     {:else}
       <div class="side-head">Références{#if currentPartId} · {refs.length}{/if}</div>
       <div class="side-scroll">
@@ -845,6 +915,19 @@
   .ref-del { flex: 0 0 auto; background: none; border: none; cursor: pointer;
     font-size: 14px; opacity: 0.5; min-width: 30px; height: 30px; border-radius: 6px; }
   .ref-del:hover { opacity: 1; background: rgba(255,80,80,0.18); }
+
+  /* parameter controls */
+  .param { padding: 8px 10px; }
+  .param-label { display: flex; justify-content: space-between; align-items: baseline;
+    font-size: 13px; color: #d8d8da; margin-bottom: 5px; }
+  .param-val { font-size: 12px; color: #0a84ff; font-variant-numeric: tabular-nums; }
+  .param input[type="range"] { width: 100%; accent-color: #0a84ff; }
+  .param-check { display: flex; align-items: center; gap: 8px; font-size: 13px; color: #b9b9bd; cursor: pointer; }
+  .param-check input { width: 18px; height: 18px; accent-color: #0a84ff; }
+  .param select { width: 100%; background: #2a2a2c; color: #fff; border: 1px solid #3a3a3c;
+    border-radius: 7px; padding: 7px 8px; font-size: 13px; font-family: inherit; }
+  .side-empty code { background: #2a2a2c; padding: 1px 5px; border-radius: 4px;
+    color: #cfcfd2; font-size: 12px; }
   .group-label { color: #8a8a8e; font-size: 11px; text-transform: uppercase;
     letter-spacing: .5px; padding: 8px 8px 4px; }
   .group-sep { height: 1px; background: #2c2c2e; margin: 8px 4px; }

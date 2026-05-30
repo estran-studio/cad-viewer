@@ -325,6 +325,48 @@ def build_mcp(registry: Registry) -> FastMCP:
 
         return await anyio.to_thread.run_sync(_impl)
 
+    # ---- parameters ------------------------------------------------------
+    @mcp.tool()
+    def get_part_params(part: str | None = None, ctx: Context = None) -> str:  # type: ignore[assignment]
+        """Parameters this part exposes (cad_viewer.params) + current values."""
+        ps, err = _need(part, ctx)
+        if err:
+            return err
+        st = ps.status()
+        return json.dumps(
+            {"part_id": ps.part_id, "schema": st["param_schema"],
+             "values": st["param_values"]},
+            indent=2, ensure_ascii=False,
+        )
+
+    @mcp.tool()
+    async def set_part_params(
+        values: dict, part: str | None = None, ctx: Context = None  # type: ignore[assignment]
+    ) -> str:
+        """Set parameter overrides and rebuild. `values` = {name: value, …}.
+
+        Only names declared by the part via cad_viewer.params take effect; the
+        part rebuilds with them (persisted across restarts).
+        """
+        ps, err = _need(part, ctx)
+        if err:
+            return err
+        with ps.lock:
+            ps.param_values = {**ps.param_values, **(values or {})}
+            new_values = dict(ps.param_values)
+        registry.params.save(ps.part_id, new_values)
+
+        def _impl() -> str:
+            ok, msg = build_part(registry, ps)
+            return ("OK — " if ok else "ÉCHEC —\n") + msg
+
+        res = await anyio.to_thread.run_sync(_impl)
+        st = ps.status()
+        return json.dumps(
+            {"result": res, "values": st["param_values"], "schema": st["param_schema"]},
+            indent=2, ensure_ascii=False,
+        )
+
     @mcp.tool()
     def get_part_info(part: str | None = None, ctx: Context = None) -> str:  # type: ignore[assignment]
         """Bounding box / volume / node labels of your part."""

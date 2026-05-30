@@ -52,6 +52,7 @@ def build_part(registry: Registry, ps: PartState) -> tuple[bool, str]:
             res = load_part(
                 Path(ps.part_path),
                 Path(ps.project_root) if ps.project_root else None,
+                overrides=ps.param_values,
             )
         except PartError as exc:
             ps.set_build_error(str(exc))
@@ -69,6 +70,7 @@ def build_part(registry: Registry, ps: PartState) -> tuple[bool, str]:
             node_names=res.node_names,
             bbox=res.bbox,
             volume=res.volume,
+            param_schema=res.param_schema,
         )
         ps.mark_build_done()
         return True, f"built v{v} ({res.model_format}, {len(res.model_bytes)} bytes)"

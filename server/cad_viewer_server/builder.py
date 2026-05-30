@@ -36,6 +36,7 @@ log = logging.getLogger("cad-viewer")
 PRIO_INTERACTIVE = 0   # tablet/MCP is actively loading this part — build now
 PRIO_EDIT = 5          # the part whose own .py the user just saved
 PRIO_BACKGROUND = 10   # collateral rebuilds (shared helper changed, etc.)
+PRIO_PREWARM = 20      # speculative builds of other param combos (lowest)
 
 
 class BuildQueue:
@@ -54,16 +55,37 @@ class BuildQueue:
             )
             self._worker.start()
 
-    def request(self, ps: "PartState", priority: int = PRIO_BACKGROUND) -> None:
+    def request(
+        self,
+        ps: "PartState",
+        priority: int = PRIO_BACKGROUND,
+        values: dict | None = None,   # None → build the part's CURRENT values
+        display: bool = True,         # False → prewarm: build+cache, don't show
+    ) -> None:
         """Enqueue a (re)build of `ps`. Returns immediately. Coalesces."""
         self.start()  # defensive: idempotent, so request always works
+        vkey = "<current>" if values is None else ps._cache_key(values)
+        qkey = (ps.part_id, vkey, display)
         with self._lock:
-            prev = self._queued.get(ps.part_id)
+            prev = self._queued.get(qkey)
             if prev is not None and prev <= priority:
                 return  # already pending at the same or higher priority
-            self._queued[ps.part_id] = priority if prev is None else min(prev, priority)
-            self._q.put((priority, next(self._seq), ps.part_id))
-        ps.mark_build_pending()
+            self._queued[qkey] = priority if prev is None else min(prev, priority)
+            self._q.put((priority, next(self._seq), ps.part_id, values, display))
+        if display:
+            ps.mark_build_pending()
+
+    def _schedule_prewarm(self, ps: "PartState") -> None:
+        """After a visible build, speculatively build the part's OTHER enum
+        values into the cache so switching to them later is instant."""
+        enum = next((p for p in ps.param_schema if p.get("type") == "enum"), None)
+        if not enum:
+            return
+        current = dict(ps.param_values)
+        for opt in enum.get("options", []):
+            vals = {**current, enum["name"]: opt}
+            if ps.cache_get(vals) is None:
+                self.request(ps, PRIO_PREWARM, values=vals, display=False)
 
     def ensure_built(
         self,
@@ -90,15 +112,19 @@ class BuildQueue:
         from .watcher import build_part
 
         while True:
-            _prio, _seq, part_id = self._q.get()
-            with self._lock:
-                if self._queued.get(part_id) is None:
-                    continue  # stale duplicate already handled
-                self._queued.pop(part_id, None)
+            _prio, _seq, part_id, values, display = self._q.get()
             ps = self.registry.parts.get(part_id)
             if ps is None:
                 continue
+            vkey = "<current>" if values is None else ps._cache_key(values)
+            qkey = (part_id, vkey, display)
+            with self._lock:
+                if self._queued.get(qkey) is None:
+                    continue  # stale duplicate already handled
+                self._queued.pop(qkey, None)
             try:
-                build_part(self.registry, ps)
+                ok, _msg = build_part(self.registry, ps, values=values, display=display)
+                if ok and display:
+                    self._schedule_prewarm(ps)
             except Exception:  # noqa: BLE001 — never let the worker die
                 log.exception("build worker error on %s", part_id)

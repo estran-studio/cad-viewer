@@ -36,17 +36,31 @@ def _py_filter(change: Change, path: str) -> bool:
     return p.suffix == ".py"
 
 
-def build_part(registry: Registry, ps: PartState) -> tuple[bool, str]:
+def build_part(
+    registry: Registry,
+    ps: PartState,
+    values: dict | None = None,
+    display: bool = True,
+) -> tuple[bool, str]:
     """(Re)run one part under the global build lock. Updates state + WS.
 
-    The single build worker (builder.BuildQueue) is the normal caller, but MCP
-    tools (rebuild_part / get_current_render / select_part→open_part) still call
-    this directly on their own thread — `build_lock` keeps all of them serial.
-    `mark_build_done` clears `building` and wakes anyone in `ensure_built`.
+    `values=None` builds the part's CURRENT param values; pass a dict to build a
+    specific combo. `display=False` is a PREWARM build: load + cache the combo
+    but don't touch the visible model / building flag (so background warm-ups
+    never flicker a spinner or wake `ensure_built` waiters).
+
+    The single build worker is the normal caller, but MCP tools (rebuild_part /
+    get_current_render / select_part→open_part) call this directly — `build_lock`
+    keeps all OCP work serial. `mark_build_done` clears `building` and wakes
+    anyone in `ensure_built`.
     """
+    vals = ps.param_values if values is None else values
+
     # Instant path: this parameter combo was already built and cached.
-    hit = ps.cache_get(ps.param_values)
+    hit = ps.cache_get(vals)
     if hit is not None:
+        if not display:
+            return True, "cached"
         v = ps.set_model(
             hit["data"], hit["fmt"], obj=hit["obj"], node_names=hit["nodes"],
             bbox=hit["bbox"], volume=hit["volume"], param_schema=hit["schema"],
@@ -54,41 +68,43 @@ def build_part(registry: Registry, ps: PartState) -> tuple[bool, str]:
         ps.mark_build_done()
         return True, f"cached v{v}"
 
-    with registry.build_lock:
+    if display:
         with ps.lock:
             ps.building = True
             ps.build_started_at = time.time()
-        try:
+    try:
+        with registry.build_lock:
             res = load_part(
                 Path(ps.part_path),
                 Path(ps.project_root) if ps.project_root else None,
-                overrides=ps.param_values,
+                overrides=vals,
             )
-        except PartError as exc:
+    except PartError as exc:
+        if display:
             ps.set_build_error(str(exc))
             ps.mark_build_done()
-            return False, str(exc)
-        except Exception as exc:  # noqa: BLE001
-            msg = f"{type(exc).__name__}: {exc}\n\n{traceback.format_exc()}"
+        return False, str(exc)
+    except Exception as exc:  # noqa: BLE001
+        msg = f"{type(exc).__name__}: {exc}\n\n{traceback.format_exc()}"
+        if display:
             ps.set_build_error(msg)
             ps.mark_build_done()
-            return False, msg
-        ps.cache_put(ps.param_values, {
-            "data": res.model_bytes, "fmt": res.model_format, "obj": res.obj,
-            "nodes": res.node_names, "bbox": res.bbox, "volume": res.volume,
-            "schema": res.param_schema,
-        })
-        v = ps.set_model(
-            res.model_bytes,
-            res.model_format,
-            obj=res.obj,
-            node_names=res.node_names,
-            bbox=res.bbox,
-            volume=res.volume,
-            param_schema=res.param_schema,
-        )
-        ps.mark_build_done()
-        return True, f"built v{v} ({res.model_format}, {len(res.model_bytes)} bytes)"
+        return False, msg
+
+    ps.cache_put(vals, {
+        "data": res.model_bytes, "fmt": res.model_format, "obj": res.obj,
+        "nodes": res.node_names, "bbox": res.bbox, "volume": res.volume,
+        "schema": res.param_schema,
+    })
+    if not display:
+        return True, "prewarmed"
+    v = ps.set_model(
+        res.model_bytes, res.model_format, obj=res.obj,
+        node_names=res.node_names, bbox=res.bbox, volume=res.volume,
+        param_schema=res.param_schema,
+    )
+    ps.mark_build_done()
+    return True, f"built v{v} ({res.model_format}, {len(res.model_bytes)} bytes)"
 
 
 def open_part(registry: Registry, ref: str) -> PartState:

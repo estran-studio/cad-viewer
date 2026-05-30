@@ -335,9 +335,33 @@ def build_mcp(registry: Registry) -> FastMCP:
         st = ps.status()
         return json.dumps(
             {"part_id": ps.part_id, "schema": st["param_schema"],
-             "values": st["param_values"]},
+             "values": st["param_values"],
+             "presets": registry.params.load_presets(ps.part_id)},
             indent=2, ensure_ascii=False,
         )
+
+    @mcp.tool()
+    async def apply_param_preset(
+        name: str, part: str | None = None, ctx: Context = None  # type: ignore[assignment]
+    ) -> str:
+        """Apply a saved named parameter preset and rebuild."""
+        ps, err = _need(part, ctx)
+        if err:
+            return err
+        presets = registry.params.load_presets(ps.part_id)
+        if name not in presets:
+            return f"Preset inconnu: {name}. Dispo: {', '.join(presets) or '(aucun)'}"
+        with ps.lock:
+            ps.param_values = dict(presets[name])
+        registry.params.save(ps.part_id, dict(ps.param_values))
+
+        def _impl() -> str:
+            ok, msg = build_part(registry, ps)
+            return ("OK — " if ok else "ÉCHEC —\n") + msg
+
+        res = await anyio.to_thread.run_sync(_impl)
+        return json.dumps({"applied": name, "result": res, "values": ps.param_values},
+                          indent=2, ensure_ascii=False)
 
     @mcp.tool()
     async def set_part_params(

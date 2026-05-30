@@ -49,3 +49,21 @@ class ParamStore:
             (self.root / f"{_safe(part_id)}.json").write_text(
                 json.dumps(values, indent=2)
             )
+
+    # ---- named presets (combos of values) -------------------------------
+    def load_presets(self, part_id: str) -> dict:
+        p = self.root / f"{_safe(part_id)}.presets.json"
+        if not p.exists():
+            return {}
+        try:
+            d = json.loads(p.read_text())
+            return d if isinstance(d, dict) else {}
+        except (OSError, ValueError):
+            return {}
+
+    def save_presets(self, part_id: str, presets: dict) -> None:
+        with self._lock:
+            self.root.mkdir(parents=True, exist_ok=True)
+            (self.root / f"{_safe(part_id)}.presets.json").write_text(
+                json.dumps(presets, indent=2)
+            )

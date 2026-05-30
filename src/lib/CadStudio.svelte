@@ -63,6 +63,8 @@
   interface ParamDef { name: string; type: 'num' | 'bool' | 'enum'; default: any; label: string; min?: number; max?: number; step?: number; options?: string[]; }
   let paramSchema: ParamDef[] = [];
   let paramValues: Record<string, any> = {};
+  let paramPresets: Record<string, Record<string, any>> = {};
+  let newPresetName = '';
   let paramTimer: any = null;
 
   let wsState: 'connecting' | 'live' | 'down' = 'connecting';
@@ -514,11 +516,26 @@
       );
       const j = await r.json();
       paramSchema = j.schema || [];
+      paramPresets = j.presets || {};
       // start from declared defaults, overlay saved values
       const v: Record<string, any> = {};
       for (const p of paramSchema) v[p.name] = p.default;
       paramValues = { ...v, ...(j.values || {}) };
     } catch { /* keep last */ }
+  }
+
+  async function presetAction(action: 'save' | 'apply' | 'delete', name: string) {
+    if (!currentPartId || !name) return;
+    try {
+      const r = await fetch(`${apiBase}/api/params/preset`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ part: currentPartId, action, name }),
+      });
+      const j = await r.json();
+      if (j.presets) paramPresets = j.presets;
+      if (action === 'apply' && j.values) paramValues = { ...paramValues, ...j.values };
+    } catch { /* WS reload reconciles */ }
   }
 
   function setParam(name: string, value: any) {
@@ -680,6 +697,19 @@
         {:else if !paramSchema.length}
           <div class="side-empty">Cette pièce n'expose aucun paramètre. Dans son .py : <code>from cad_viewer import params</code> puis <code>params.num(…)</code> / <code>params.flag(…)</code> / <code>params.choice(…)</code>.</div>
         {:else}
+          <div class="presets">
+            {#each Object.keys(paramPresets) as pn}
+              <span class="preset-chip">
+                <button class="preset-apply" on:click={() => presetAction('apply', pn)} title="Appliquer">{pn}</button>
+                <button class="preset-del" aria-label="supprimer preset" on:click={() => presetAction('delete', pn)}>✕</button>
+              </span>
+            {/each}
+            <span class="preset-save">
+              <input placeholder="nom du preset" bind:value={newPresetName}
+                on:keydown={(e) => { if (e.key === 'Enter' && newPresetName.trim()) { presetAction('save', newPresetName.trim()); newPresetName = ''; } }} />
+              <button on:click={() => { if (newPresetName.trim()) { presetAction('save', newPresetName.trim()); newPresetName = ''; } }}>💾</button>
+            </span>
+          </div>
           {#each paramSchema as p (p.name)}
             <div class="param">
               <div class="param-label">
@@ -928,6 +958,24 @@
     border-radius: 7px; padding: 7px 8px; font-size: 13px; font-family: inherit; }
   .side-empty code { background: #2a2a2c; padding: 1px 5px; border-radius: 4px;
     color: #cfcfd2; font-size: 12px; }
+
+  /* parameter presets */
+  .presets { display: flex; flex-wrap: wrap; gap: 6px; padding: 8px 10px 4px;
+    border-bottom: 1px solid #262628; margin-bottom: 4px; }
+  .preset-chip { display: inline-flex; align-items: center; background: #2a2a2c;
+    border: 1px solid #3a3a3c; border-radius: 7px; overflow: hidden; }
+  .preset-apply { background: none; border: none; color: #d8d8da; cursor: pointer;
+    font-size: 12px; padding: 5px 8px; }
+  .preset-apply:hover { background: #0a4a8a; color: #fff; }
+  .preset-del { background: none; border: none; color: #8a8a8e; cursor: pointer;
+    font-size: 11px; padding: 5px 6px; }
+  .preset-del:hover { color: #ff6b6b; }
+  .preset-save { display: inline-flex; gap: 4px; align-items: center; }
+  .preset-save input { width: 110px; background: #1c1c1e; color: #fff;
+    border: 1px solid #3a3a3c; border-radius: 7px; padding: 5px 8px; font-size: 12px;
+    font-family: inherit; }
+  .preset-save button { background: #2c2c2e; color: #fff; border: 1px solid #3a3a3c;
+    border-radius: 7px; padding: 5px 9px; font-size: 13px; cursor: pointer; }
   .group-label { color: #8a8a8e; font-size: 11px; text-transform: uppercase;
     letter-spacing: .5px; padding: 8px 8px 4px; }
   .group-sep { height: 1px; background: #2c2c2e; margin: 8px 4px; }

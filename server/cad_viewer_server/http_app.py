@@ -163,6 +163,7 @@ def create_app(registry: Registry) -> FastAPI:
             "part_id": ps.part_id,
             "schema": st["param_schema"],
             "values": st["param_values"],
+            "presets": registry.params.load_presets(ps.part_id),
         })
 
     @app.post("/api/params")
@@ -182,6 +183,35 @@ def create_app(registry: Registry) -> FastAPI:
         ensure_watcher(registry, ps)
         registry.builder.request(ps, PRIO_INTERACTIVE)
         return JSONResponse({"status": "ok", "part": ps.part_id, "values": new_values})
+
+    @app.post("/api/params/preset")
+    async def api_param_preset(request: Request) -> JSONResponse:
+        body = await request.json()
+        ps = registry.resolve(body.get("part"))
+        if ps is None:
+            return JSONResponse({"error": "unknown part"}, status_code=404)
+        action = body.get("action")
+        name = (body.get("name") or "").strip()
+        presets = registry.params.load_presets(ps.part_id)
+        if action == "save" and name:
+            presets[name] = dict(ps.param_values)
+            registry.params.save_presets(ps.part_id, presets)
+        elif action == "delete" and name:
+            presets.pop(name, None)
+            registry.params.save_presets(ps.part_id, presets)
+        elif action == "apply" and name in presets:
+            with ps.lock:
+                ps.param_values = dict(presets[name])
+                new_values = dict(ps.param_values)
+            registry.params.save(ps.part_id, new_values)
+            ensure_watcher(registry, ps)
+            registry.builder.request(ps, PRIO_INTERACTIVE)
+        else:
+            return JSONResponse({"error": "bad action/name"}, status_code=400)
+        return JSONResponse({
+            "status": "ok", "part": ps.part_id,
+            "presets": presets, "values": ps.param_values,
+        })
 
     # ---- reference library (disk-persisted, per part) -------------------
     @app.get("/api/references")

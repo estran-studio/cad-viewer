@@ -15,6 +15,7 @@ part_id = "<project name>/<relpath without .py>", collisions get a -N suffix.
 
 from __future__ import annotations
 
+import fnmatch
 import logging
 import tomllib
 from dataclasses import dataclass, field
@@ -45,11 +46,17 @@ def load_config(path: Path) -> Config:
         name = proj["name"]
         root = str(Path(proj["root"]).expanduser().resolve())
         rels = list(proj.get("parts", []))
+        # glob discovery, minus any `exclude` fnmatch patterns (the explicit
+        # `parts` list is intentional and never excluded). Lets one project own
+        # a subtree while another hides part of it (e.g. consolidated helpers).
+        excludes = list(proj.get("exclude", []))
         if proj.get("glob"):
             for p in sorted(Path(root).glob(proj["glob"])):
                 if p.name == "__init__.py" or not p.is_file():
                     continue
                 rel = p.relative_to(root).as_posix()
+                if any(fnmatch.fnmatch(rel, pat) for pat in excludes):
+                    continue
                 if rel not in rels:
                     rels.append(rel)
 

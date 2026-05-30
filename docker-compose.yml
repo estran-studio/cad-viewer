@@ -27,11 +27,16 @@ services:
       - /Users/wq/Project/bascanada/my_fleet/cad:/Users/wq/Project/bascanada/my_fleet/cad:ro
       # Le fichier de config monté en lecture seule.
       - ./cad-viewer.toml:/app/cad-viewer.toml:ro
+      # Données persistantes (bibliothèque d'images de référence) — survit aux
+      # rebuilds d'image. Visible/éditable sur l'hôte sous ./.cad-data.
+      - ./.cad-data:/data
     environment:
       # Filet de sécurité watcher si jamais virtiofs+inotify pose problème
       # (active le polling — léger coût CPU). Décommente si live-reload muet.
       # WATCHFILES_FORCE_POLLING: "true"
       PYTHONUNBUFFERED: "1"
+      # Racine des données persistantes (cf. references.ReferenceStore).
+      CAD_VIEWER_DATA: "/data"
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:32325/api/parts',timeout=2).status==200 else 1)"]
       interval: 30s

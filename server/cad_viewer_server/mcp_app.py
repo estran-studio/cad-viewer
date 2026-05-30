@@ -199,6 +199,92 @@ def build_mcp(registry: Registry) -> FastMCP:
             _image(fb.png),
         ]
 
+    # ---- reference library ----------------------------------------------
+    @mcp.tool()
+    def get_references(
+        limit: int = 6, part: str | None = None, ctx: Context = None  # type: ignore[assignment]
+    ) -> list:
+        """Kept reference images for your part (boat photos, drawings, …).
+
+        These persist across sessions — use them to compare your model to the
+        target shape WITHOUT the user re-pasting images. Returns the `limit`
+        most recent, newest first, each with its label/note.
+        """
+        ps, err = _need(part, ctx)
+        if err:
+            return [_text(err)]
+        items = list(reversed(registry.references.list(ps.part_id)))
+        if not items:
+            return [_text(f"Aucune image de référence gardée pour {ps.part_id}.")]
+        out: list = [_text(
+            f"{len(items)} référence(s) pour {ps.part_id} "
+            f"(affichées: {min(limit, len(items))}, plus récentes d'abord)."
+        )]
+        for it in items[: max(1, limit)]:
+            png = registry.references.get_png(ps.part_id, it["id"])
+            if png is None:
+                continue
+            meta = {k: it[k] for k in ("id", "label", "note") if it.get(k)}
+            out.append(_text(json.dumps(meta, ensure_ascii=False)))
+            out.append(_image(png))
+        return out
+
+    @mcp.tool()
+    def add_reference_note(
+        ref_id: int, note: str, part: str | None = None, ctx: Context = None  # type: ignore[assignment]
+    ) -> str:
+        """Attach/replace a note on one kept reference image."""
+        ps, err = _need(part, ctx)
+        if err:
+            return err
+        ok = registry.references.set_note(ps.part_id, ref_id, note)
+        return f"{'OK' if ok else 'introuvable'}: réf #{ref_id} sur {ps.part_id}"
+
+    @mcp.tool()
+    async def compare_to_ref(
+        ref_id: int | None = None, part: str | None = None, ctx: Context = None  # type: ignore[assignment]
+    ) -> list:
+        """Current headless iso render + reference image(s) side by side.
+
+        Replaces the manual "render the model, open a ref, eyeball them"
+        loop. With `ref_id` compares against that one; otherwise against all
+        kept references (newest first).
+        """
+        ps, err = _need(part, ctx)
+        if err:
+            return [_text(err)]
+
+        def _render() -> bytes | None:
+            open_part(registry, ps.part_id)
+            if not ps.build_ok or ps.last_obj is None:
+                return None
+            with registry.build_lock:
+                return render_iso_png(ps.last_obj)
+
+        render = await anyio.to_thread.run_sync(_render)
+        out: list = []
+        if render is None:
+            out.append(_text(f"Render indisponible (build échoué?):\n{ps.build_error}"))
+        else:
+            out.append(_text("Rendu iso ACTUEL du modèle :"))
+            out.append(_image(render))
+        items = registry.references.list(ps.part_id)
+        if ref_id is not None:
+            items = [i for i in items if i["id"] == ref_id]
+        else:
+            items = list(reversed(items))
+        if not items:
+            out.append(_text("Aucune référence à comparer."))
+        for it in items:
+            png = registry.references.get_png(ps.part_id, it["id"])
+            if png is None:
+                continue
+            lbl = it.get("label") or f"réf #{it['id']}"
+            note = f" — {it['note']}" if it.get("note") else ""
+            out.append(_text(f"RÉFÉRENCE « {lbl} »{note} :"))
+            out.append(_image(png))
+        return out
+
     # ---- build / render --------------------------------------------------
     @mcp.tool()
     async def get_current_render(

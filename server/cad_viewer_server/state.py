@@ -292,6 +292,10 @@ class Registry:
         from .builder import BuildQueue
 
         self.builder = BuildQueue(self)
+        # Disk-persisted, per-part reference-image library (shared with Claude).
+        from .references import ReferenceStore
+
+        self.references = ReferenceStore()
 
     def bind_loop(self, loop: asyncio.AbstractEventLoop) -> None:
         self.hub.bind_loop(loop)

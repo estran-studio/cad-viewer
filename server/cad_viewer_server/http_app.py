@@ -11,6 +11,7 @@ import asyncio
 import logging
 from contextlib import asynccontextmanager
 from pathlib import Path
+from urllib.parse import quote
 
 from fastapi import FastAPI, Form, UploadFile, WebSocket, WebSocketDisconnect
 from fastapi.concurrency import run_in_threadpool
@@ -139,6 +140,51 @@ def create_app(registry: Registry) -> FastAPI:
         return JSONResponse(
             {"status": "ok", "id": fb.id, "part": ps.part_id, "bytes": len(png)}
         )
+
+    # ---- reference library (disk-persisted, per part) -------------------
+    @app.get("/api/references")
+    async def api_references(part: str | None = None) -> JSONResponse:
+        ps = registry.resolve(part) if part else registry.single()
+        if ps is None:
+            return JSONResponse({"error": "unknown part", "part": part}, status_code=404)
+        items = registry.references.list(ps.part_id)
+        q = quote(ps.part_id, safe="")
+        for it in items:
+            it["url"] = f"/api/references/file?part={q}&id={it['id']}"
+        return JSONResponse({"part_id": ps.part_id, "items": items})
+
+    @app.get("/api/references/file")
+    async def api_reference_file(part: str, id: int) -> Response:
+        ps = registry.resolve(part)
+        if ps is None:
+            return JSONResponse({"error": "unknown part", "part": part}, status_code=404)
+        png = registry.references.get_png(ps.part_id, id)
+        if png is None:
+            return JSONResponse({"error": "not found"}, status_code=404)
+        return Response(content=png, media_type="image/png",
+                        headers={"Cache-Control": "no-store"})
+
+    @app.post("/api/references")
+    async def api_reference_add(
+        image: UploadFile,
+        part: str = Form(...),
+        label: str = Form(""),
+        note: str = Form(""),
+    ) -> JSONResponse:
+        ps = registry.resolve(part)
+        if ps is None:
+            return JSONResponse({"error": "unknown part", "part": part}, status_code=404)
+        png = await image.read()
+        rec = registry.references.add(ps.part_id, png, label=label, note=note)
+        return JSONResponse({"status": "ok", "part": ps.part_id, **rec})
+
+    @app.delete("/api/references")
+    async def api_reference_delete(part: str = Form(...), id: int = Form(...)) -> JSONResponse:
+        ps = registry.resolve(part)
+        if ps is None:
+            return JSONResponse({"error": "unknown part", "part": part}, status_code=404)
+        ok = registry.references.delete(ps.part_id, id)
+        return JSONResponse({"status": "ok" if ok else "not_found", "id": id})
 
     @app.websocket("/ws")
     async def ws(websocket: WebSocket) -> None:

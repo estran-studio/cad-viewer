@@ -28,3 +28,6 @@ server/.uv-cache
 *.njsproj
 *.sln
 *.sw?
+
+# cad-viewer persistent data (reference library)
+.cad-data/

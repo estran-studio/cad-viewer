@@ -31,3 +31,7 @@ server/.uv-cache
 
 # cad-viewer persistent data (reference library)
 .cad-data/
+
+# Python bytecode
+__pycache__/
+*.pyc

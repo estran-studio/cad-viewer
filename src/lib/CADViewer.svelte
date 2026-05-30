@@ -346,6 +346,20 @@
     sceneManager?.clear();
   }
 
+  // Overlay a previous build (translucent) for visual diff. Additive: the
+  // current model is untouched. clearGhost() removes it.
+  export async function loadGhostUrl(url: string): Promise<void> {
+    if (!sceneManager) return;
+    const res = await fetch(url, { cache: 'no-store' });
+    if (!res.ok) throw new Error('HTTP ' + res.status);
+    const fmt = (res.headers.get('X-Model-Format') as 'stl' | '3mf' | 'glb') || inferType(url);
+    await sceneManager.loadGhostFromBuffer(await res.arrayBuffer(), fmt);
+  }
+
+  export function clearGhost() {
+    sceneManager?.clearGhost();
+  }
+
   export function captureViewPNG(): string {
     return sceneManager ? sceneManager.captureCanvasDataURL() : '';
   }

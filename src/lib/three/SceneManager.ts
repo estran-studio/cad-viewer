@@ -23,6 +23,7 @@ export class SceneManager {
   // For GLB the loaded result is a whole scene graph (named nodes); for
   // STL/3MF it's just the single mesh. Annotation picking walks this.
   public currentObject: THREE.Object3D | null = null;
+  private ghostObject: THREE.Object3D | null = null; // previous-version overlay (diff)
   public gridHelper!: THREE.GridHelper;
   private gridSize = 100;
   private gridDivisions = 100;
@@ -330,7 +331,7 @@ export class SceneManager {
     };
   }
 
-  public clear() { this.clearCurrentModel(); }
+  public clear() { this.clearCurrentModel(); this.clearGhost(); }
 
   private clearCurrentModel() {
     if (this.currentMesh) {
@@ -428,6 +429,50 @@ export class SceneManager {
 
     if (meshes.length === 0) return { triangleCount: 0, dimensions: null };
     return this.calculateModelInfo(meshes);
+  }
+
+  /**
+   * Overlay a *previous* build as a translucent "ghost" for visual diffing,
+   * without disturbing the current model. Call clearGhost() to remove it.
+   */
+  public async loadGhostFromBuffer(buffer: ArrayBuffer, payloadType: PayloadType): Promise<void> {
+    this.clearGhost();
+    let root: THREE.Object3D;
+    if (payloadType === 'glb') {
+      const gltf = await new Promise<any>((resolve, reject) =>
+        this.gltfLoader.parse(buffer, '', resolve, reject)
+      );
+      root = gltf.scene || gltf.scenes?.[0];
+    } else if (payloadType === 'stl') {
+      root = new THREE.Mesh(this.stlLoader.parse(buffer));
+    } else {
+      root = this.threeMFLoader.parse(buffer);
+    }
+    const ghostMat = new THREE.MeshStandardMaterial({
+      color: 0xff8a2a, transparent: true, opacity: 0.3,
+      depthWrite: false, metalness: 0.0, roughness: 1.0,
+    });
+    root.traverse((o) => {
+      const m = o as THREE.Mesh;
+      if (m.isMesh) { m.material = ghostMat; m.castShadow = m.receiveShadow = false; m.renderOrder = -1; }
+    });
+    this.scene.add(root);
+    this.ghostObject = root;
+  }
+
+  public clearGhost(): void {
+    if (!this.ghostObject) return;
+    this.scene.remove(this.ghostObject);
+    this.ghostObject.traverse((o) => {
+      const m = o as THREE.Mesh;
+      if (m.isMesh) {
+        m.geometry?.dispose();
+        const mat = m.material;
+        if (Array.isArray(mat)) mat.forEach((x) => x.dispose());
+        else mat?.dispose();
+      }
+    });
+    this.ghostObject = null;
   }
 
   /** Re-render this frame and return it as a PNG data URL (for compositing). */

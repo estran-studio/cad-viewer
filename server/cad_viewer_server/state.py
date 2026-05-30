@@ -120,6 +120,7 @@ class PartState:
     loaded: bool = False
     building: bool = False
     last_obj: object | None = None  # cached LoadResult.obj for get_current_render
+    history: list = field(default_factory=list)  # past builds for visual diff
 
     # ---- tabs / recents (shared across tablets + visible to Claude) ------
     open: bool = False           # shown as an open tab on the tablet
@@ -155,6 +156,15 @@ class PartState:
         param_schema: list | None = None,
     ) -> int:
         with self.lock:
+            # keep the outgoing build for visual diff (cap 5, RAM only)
+            if self.model_bytes is not None:
+                self.history.append({
+                    "version": self.version,
+                    "format": self.model_format,
+                    "data": self.model_bytes,
+                })
+                if len(self.history) > 5:
+                    self.history = self.history[-5:]
             self.model_bytes = data
             self.model_format = fmt
             self.version += 1
@@ -280,6 +290,20 @@ class PartState:
             self.part_id, fb.id, len(png), bool(note),
         )
         return fb
+
+    # ---- version history (visual diff) ----------------------------------
+    def model_at(self, version: int) -> tuple[bytes, str] | None:
+        with self.lock:
+            if version == self.version and self.model_bytes is not None:
+                return self.model_bytes, self.model_format
+            for h in self.history:
+                if h["version"] == version:
+                    return h["data"], h["format"]
+        return None
+
+    def history_versions(self) -> list[int]:
+        with self.lock:
+            return [h["version"] for h in self.history]
 
     def take_oldest_unconsumed(self, consume: bool) -> Feedback | None:
         with self.lock:

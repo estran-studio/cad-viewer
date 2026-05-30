@@ -62,6 +62,10 @@
   let measuring = false;
   let measurePts: { x: number; y: number }[] = []; // overlay CSS px, ≤2
   let pendingMm = '';
+  // ---- visual diff (ghost of a previous build) ----
+  let diffOn = false;
+  let histVersions: number[] = [];
+  let ghostVersion: number | null = null;
 
   // ---- parameters (cad_viewer.params → ⚙️ panel) ----
   interface ParamDef { name: string; type: 'num' | 'bool' | 'enum'; default: any; label: string; min?: number; max?: number; step?: number; options?: string[]; }
@@ -253,6 +257,8 @@
     wsSubscribe();
     refreshRefs();
     refreshParams();
+    diffOn = false; ghostVersion = null; // ghost cleared by clearScene on switch
+    refreshHistory();
   }
 
   function closeTab(id: string) {
@@ -300,6 +306,10 @@
           loadModel({ version });
           refreshParts();
           if (activeView === 'params') refreshParams();
+          if (diffOn) refreshHistory().then(() => {
+            const prev = histVersions.length ? histVersions[histVersions.length - 1] : null;
+            if (prev != null) loadGhost(prev);
+          });
         } else if (msg.type === 'build_error') {
           building = false;
           showToast('⚠ build123d a échoué — voir le terminal');
@@ -335,6 +345,39 @@
       }
     } finally {
       building = false;
+    }
+  }
+
+  // ---- visual diff (ghost overlay of a previous build) ----------------
+  async function refreshHistory() {
+    if (!currentPartId) { histVersions = []; return; }
+    try {
+      const r = await fetch(
+        `${apiBase}/api/model/history?part=${encodeURIComponent(currentPartId)}`,
+        { cache: 'no-store' }
+      );
+      histVersions = (await r.json()).history || [];
+    } catch { /* keep last */ }
+  }
+
+  function loadGhost(v: number) {
+    if (!currentPartId) return;
+    ghostVersion = v;
+    viewerEl?.loadGhostUrl?.(
+      `${apiBase}/api/model?part=${encodeURIComponent(currentPartId)}&version=${v}`
+    ).catch(() => { /* */ });
+  }
+
+  async function toggleDiff() {
+    diffOn = !diffOn;
+    if (diffOn) {
+      await refreshHistory();
+      const prev = histVersions.length ? histVersions[histVersions.length - 1] : null;
+      if (prev != null) loadGhost(prev);
+      else { showToast('Pas encore de version précédente'); diffOn = false; }
+    } else {
+      viewerEl?.clearGhost?.();
+      ghostVersion = null;
     }
   }
 
@@ -909,6 +952,16 @@
           🖼 Référence
           <input type="file" accept="image/*" on:change={onPickFile} />
         </label>
+        {#if histVersions.length || diffOn}
+          <button class:primary={diffOn} on:click={toggleDiff} title="Comparer avec une version précédente">
+            👻 Diff{#if diffOn && ghostVersion != null} v{ghostVersion}{/if}
+          </button>
+        {/if}
+        {#if diffOn && histVersions.length > 1}
+          <select class="diff-sel" value={ghostVersion} on:change={(e) => loadGhost(Number((e.target as HTMLSelectElement).value))}>
+            {#each histVersions as v}<option value={v}>v{v}</option>{/each}
+          </select>
+        {/if}
       {:else}
         <div class="colors">
           {#each COLORS as c}
@@ -1168,6 +1221,9 @@
   .toolbar .ref input { position: absolute; inset: 0; opacity: 0; cursor: pointer; }
   .toolbar .note { background: #1c1c1e; cursor: text; width: min(40vw, 300px);
     justify-content: flex-start; padding: 0 14px; }
+  .toolbar .diff-sel { background: #2c2c2e; color: #fff; border: 1px solid #4a4a4c;
+    border-radius: 9px; padding: 0 10px; min-height: 44px; font-size: 14px;
+    font-family: inherit; cursor: pointer; }
   .colors { display: flex; gap: 6px; }
   .swatch { width: 28px; height: 28px; min-height: 28px; border-radius: 50%;
     padding: 0; border: 2px solid #1c1c1e; cursor: pointer; }

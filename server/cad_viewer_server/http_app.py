@@ -98,11 +98,32 @@ def create_app(registry: Registry) -> FastAPI:
         ensure_watcher(registry, ps)
         registry.builder.ensure_built(ps, PRIO_INTERACTIVE)
 
-    @app.get("/api/model")
-    async def api_model(part: str | None = None) -> Response:
+    @app.get("/api/model/history")
+    async def api_model_history(part: str | None = None) -> JSONResponse:
         ps = _resolve_or_404(part)
         if ps is None:
             return JSONResponse({"error": "unknown part", "part": part}, status_code=404)
+        return JSONResponse({
+            "part_id": ps.part_id,
+            "current": ps.version,
+            "history": ps.history_versions(),
+        })
+
+    @app.get("/api/model")
+    async def api_model(part: str | None = None, version: int | None = None) -> Response:
+        ps = _resolve_or_404(part)
+        if ps is None:
+            return JSONResponse({"error": "unknown part", "part": part}, status_code=404)
+        # historical version (for visual diff): serve straight from the buffer
+        if version is not None:
+            hit = ps.model_at(version)
+            if hit is None:
+                return JSONResponse({"error": "version not available", "version": version}, status_code=404)
+            data, fmt = hit
+            media = "model/gltf-binary" if fmt == "glb" else "model/stl"
+            return Response(content=data, media_type=media, headers={
+                "X-Model-Version": str(version), "X-Model-Format": fmt,
+                "X-Part-Id": ps.part_id, "Cache-Control": "no-store"})
         if not (ps.loaded and ps.model_bytes is not None):
             await run_in_threadpool(_lazy_build, ps)  # prioritized, non-blocking enqueue
         if ps.model_bytes is None:

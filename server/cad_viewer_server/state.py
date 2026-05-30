@@ -119,6 +119,19 @@ class PartState:
     building: bool = False
     last_obj: object | None = None  # cached LoadResult.obj for get_current_render
 
+    # ---- tabs / recents (shared across tablets + visible to Claude) ------
+    open: bool = False           # shown as an open tab on the tablet
+    opened_at: float = 0.0       # when it became a tab (stable tab order)
+    last_active_at: float = 0.0  # last time it was selected (recents order)
+
+    # ---- build queue bookkeeping (see builder.BuildQueue) ----------------
+    build_requested_at: float = 0.0   # when it was enqueued while not building
+    build_started_at: float = 0.0     # when the worker actually started it
+    build_attempts: int = 0           # bumped after every finished build (ok or fail)
+    # Separate Condition (its own lock) so a loader can wait for a build to
+    # finish without contending on `self.lock`.
+    build_cv: threading.Condition = field(default_factory=threading.Condition)
+
     feedback_queue: list[Feedback] = field(default_factory=list)
     lock: threading.Lock = field(default_factory=threading.Lock)
     _ids: "itertools.count[int]" = field(default_factory=lambda: itertools.count(1))
@@ -167,6 +180,32 @@ class PartState:
             {"type": "build_error", "version": self.version, "part": self.part_id},
         )
 
+    # ---- build lifecycle (driven by builder.BuildQueue + watcher) --------
+    def mark_build_pending(self) -> None:
+        """Enqueued for a build: reflect it in the status NOW (honest spinner)."""
+        with self.lock:
+            if not self.building:
+                self.build_requested_at = time.time()
+            self.building = True
+        self.hub.publish(
+            self.part_id,
+            {"type": "build_start", "version": self.version, "part": self.part_id},
+        )
+
+    def mark_build_done(self) -> None:
+        """A build finished (ok or fail): clear `building`, wake any waiters."""
+        with self.build_cv:
+            with self.lock:
+                self.building = False
+            self.build_attempts += 1
+            self.build_cv.notify_all()
+
+    def _build_elapsed_s(self) -> float | None:
+        if not self.building:
+            return None
+        ref = self.build_started_at or self.build_requested_at
+        return round(time.time() - ref, 1) if ref else None
+
     def status(self) -> dict:
         with self.lock:
             return {
@@ -177,6 +216,10 @@ class PartState:
                 "format": self.model_format,
                 "loaded": self.loaded,
                 "building": self.building,
+                "build_elapsed_s": self._build_elapsed_s(),
+                "open": self.open,
+                "opened_at": self.opened_at,
+                "last_active_at": self.last_active_at,
                 "build_ok": self.build_ok,
                 "build_error": self.build_error,
                 "node_names": self.node_names,
@@ -244,6 +287,11 @@ class Registry:
         self.hub = Hub()
         self._watchers: dict[str, object] = {}     # root -> RootWatcher
         self._session_part: dict[str, str] = {}    # mcp-session-id -> part_id
+        # Single background worker that runs every build one-at-a-time, by
+        # priority, so callers enqueue instead of holding `build_lock`.
+        from .builder import BuildQueue
+
+        self.builder = BuildQueue(self)
 
     def bind_loop(self, loop: asyncio.AbstractEventLoop) -> None:
         self.hub.bind_loop(loop)
@@ -285,6 +333,35 @@ class Registry:
         with self.lock:
             return next(iter(self.parts.values())) if len(self.parts) == 1 else None
 
+    # ---- tabs / recents --------------------------------------------------
+    def touch_active(self, part_id: str) -> bool:
+        """Mark a part as the active tab (opens it if needed). Returns ok."""
+        ps = self.parts.get(part_id)
+        if ps is None:
+            return False
+        now = time.time()
+        with ps.lock:
+            if not ps.open:
+                ps.open = True
+                ps.opened_at = now
+            ps.last_active_at = now
+        return True
+
+    def set_open(self, part_id: str, value: bool) -> bool:
+        ps = self.parts.get(part_id)
+        if ps is None:
+            return False
+        now = time.time()
+        with ps.lock:
+            if value and not ps.open:
+                ps.open = True
+                ps.opened_at = now
+                ps.last_active_at = now
+            elif not value:
+                ps.open = False
+                ps.opened_at = 0.0  # reopening gets a fresh tab position
+        return True
+
     def loaded_parts_under(self, root: str) -> list[PartState]:
         with self.lock:
             return [
@@ -300,6 +377,10 @@ class Registry:
                 "part_path": ps.part_path,
                 "loaded": ps.loaded,
                 "building": ps.building,
+                "build_elapsed_s": ps._build_elapsed_s(),
+                "open": ps.open,
+                "opened_at": ps.opened_at,
+                "last_active_at": ps.last_active_at,
                 "build_ok": ps.build_ok,
                 "version": ps.version,
                 "format": ps.model_format,

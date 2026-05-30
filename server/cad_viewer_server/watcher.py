@@ -11,11 +11,13 @@ from __future__ import annotations
 
 import logging
 import threading
+import time
 import traceback
 from pathlib import Path
 
 from watchfiles import Change, watch
 
+from .builder import PRIO_BACKGROUND, PRIO_EDIT
 from .loader import PartError, load_part
 from .state import PartState, Registry, root_of
 
@@ -35,9 +37,17 @@ def _py_filter(change: Change, path: str) -> bool:
 
 
 def build_part(registry: Registry, ps: PartState) -> tuple[bool, str]:
-    """(Re)run one part under the global build lock. Updates state + WS."""
+    """(Re)run one part under the global build lock. Updates state + WS.
+
+    The single build worker (builder.BuildQueue) is the normal caller, but MCP
+    tools (rebuild_part / get_current_render / select_part→open_part) still call
+    this directly on their own thread — `build_lock` keeps all of them serial.
+    `mark_build_done` clears `building` and wakes anyone in `ensure_built`.
+    """
     with registry.build_lock:
-        ps.building = True
+        with ps.lock:
+            ps.building = True
+            ps.build_started_at = time.time()
         try:
             res = load_part(
                 Path(ps.part_path),
@@ -45,12 +55,12 @@ def build_part(registry: Registry, ps: PartState) -> tuple[bool, str]:
             )
         except PartError as exc:
             ps.set_build_error(str(exc))
-            ps.building = False
+            ps.mark_build_done()
             return False, str(exc)
         except Exception as exc:  # noqa: BLE001
             msg = f"{type(exc).__name__}: {exc}\n\n{traceback.format_exc()}"
             ps.set_build_error(msg)
-            ps.building = False
+            ps.mark_build_done()
             return False, msg
         v = ps.set_model(
             res.model_bytes,
@@ -60,7 +70,7 @@ def build_part(registry: Registry, ps: PartState) -> tuple[bool, str]:
             bbox=res.bbox,
             volume=res.volume,
         )
-        ps.building = False
+        ps.mark_build_done()
         return True, f"built v{v} ({res.model_format}, {len(res.model_bytes)} bytes)"
 
 
@@ -119,16 +129,50 @@ class RootWatcher(threading.Thread):
                 debounce=400,
                 step=120,
             ):
-                files = sorted({Path(p).name for _, p in changes})
                 targets = self.registry.loaded_parts_under(self.root)
                 if not targets:
                     continue
+
+                # Directory-scoped rebuilds. Editing one part's .py (or a
+                # non-part helper sitting in the same dir, e.g. arrow_geom.py)
+                # rebuilds only the loaded parts in THAT directory — not all 45
+                # loaded parts, which was the serial "build forever" storm.
+                # A change OUTSIDE every part dir (a shared fleet_cad/* helper)
+                # still rebuilds everything, because any part may import it.
+                changed: set[Path] = set()
+                for _c, p in changes:
+                    try:
+                        changed.add(Path(p).resolve())
+                    except OSError:
+                        pass
+                changed_dirs = {c.parent for c in changed}
+                part_dirs = {Path(ps.part_path).parent for ps in targets}
+                shared = any(d not in part_dirs for d in changed_dirs)
+                if shared:
+                    to_build, reason = targets, "shared helper"
+                else:
+                    to_build = [
+                        ps
+                        for ps in targets
+                        if Path(ps.part_path).parent in changed_dirs
+                    ]
+                    reason = "part dir"
+                if not to_build:
+                    continue
+
+                names = ", ".join(sorted({c.name for c in changed}))
                 log.info(
-                    "change (%s) → rebuilding %d part(s) under %s",
-                    ", ".join(files), len(targets), self.root,
+                    "change (%s) → queue %d/%d part(s) under %s [%s]",
+                    names, len(to_build), len(targets), self.root, reason,
                 )
-                for ps in targets:
-                    ok, msg = build_part(self.registry, ps)
-                    log.info("[%s] %s", ps.part_id, msg.splitlines()[0])
+                # The part whose own file changed builds first (PRIO_EDIT);
+                # collateral siblings/shared rebuilds run in the background.
+                for ps in to_build:
+                    prio = (
+                        PRIO_EDIT
+                        if Path(ps.part_path) in changed
+                        else PRIO_BACKGROUND
+                    )
+                    self.registry.builder.request(ps, prio)
         except Exception as exc:  # noqa: BLE001
             log.exception("watcher %s crashed: %s", self.root, exc)

@@ -28,9 +28,13 @@
     build_ok: boolean;
     version: number;
     pending_feedback: number;
+    open?: boolean;
+    opened_at?: number;
+    last_active_at?: number;
   }
 
   let host: HTMLElement;
+  let mainEl: HTMLElement;   // the viewer pane (overlay is sized to this)
   let viewerEl: any;
   let overlay: HTMLCanvasElement;
   let ctx: CanvasRenderingContext2D | null = null;
@@ -50,15 +54,23 @@
   let sending = false;
 
   // ---- multi-part state ----
+  type SideView = 'parts' | 'params' | 'refs';
   let parts: PartInfo[] = [];
   let currentPartId: string | null = null;
-  let drawerOpen = false;
   let building = false;
   let collapsed: Record<string, boolean> = {}; // per-project accordion state
+  // ---- VSCode-like shell ----
+  let sidebarOpen = true;
+  let activeView: SideView = 'parts';
 
-  // ---- studio-level persistence (last part, accordion) ----
+  // ---- studio-level persistence (last part, accordion, shell) ----
   const STUDIO_KEY = 'cad-studio-state';
-  type StudioState = { lastPartId?: string; collapsed?: Record<string, boolean> };
+  type StudioState = {
+    lastPartId?: string;
+    collapsed?: Record<string, boolean>;
+    sidebarOpen?: boolean;
+    activeView?: SideView;
+  };
   function loadStudioState(): StudioState {
     try {
       const s = localStorage.getItem(STUDIO_KEY);
@@ -69,9 +81,16 @@
     try {
       localStorage.setItem(
         STUDIO_KEY,
-        JSON.stringify({ lastPartId: currentPartId, collapsed })
+        JSON.stringify({ lastPartId: currentPartId, collapsed, sidebarOpen, activeView })
       );
     } catch { /* quota / private mode */ }
+  }
+
+  function toggleView(v: SideView) {
+    // Click the active icon → collapse; click another → switch & open.
+    if (sidebarOpen && activeView === v) sidebarOpen = false;
+    else { activeView = v; sidebarOpen = true; }
+    saveStudioState();
   }
 
   const COLORS = ['#ff3b30', '#34c759', '#0a84ff', '#ffd60a', '#ffffff'];
@@ -85,12 +104,16 @@
   onMount(async () => {
     ctx = overlay.getContext('2d');
     sizeOverlay();
+    // Observe the viewer pane: the overlay must follow it when the sidebar
+    // opens/closes or the window resizes.
     ro = new ResizeObserver(sizeOverlay);
-    ro.observe(host);
+    ro.observe(mainEl);
     window.addEventListener('paste', onPaste);
     await untilViewerReady();
     const studio = loadStudioState();
     if (studio.collapsed) collapsed = { ...studio.collapsed };
+    if (typeof studio.sidebarOpen === 'boolean') sidebarOpen = studio.sidebarOpen;
+    if (studio.activeView) activeView = studio.activeView;
     await refreshParts();
     if (parts.length && !currentPartId) {
       const last = studio.lastPartId;
@@ -167,17 +190,58 @@
     return acc;
   }, {});
 
+  // Open tabs (stable order by opened_at) + recents (by last_active_at).
+  // Server-shared state: every tablet & Claude (via list_parts) see the same.
+  $: openTabs = parts
+    .filter((p) => p.open)
+    .sort((a, b) => (a.opened_at || 0) - (b.opened_at || 0));
+  $: recents = parts
+    .filter((p) => (p.last_active_at || 0) > 0)
+    .sort((a, b) => (b.last_active_at || 0) - (a.last_active_at || 0))
+    .slice(0, 5);
+
+  function markActive(id: string) {
+    const fd = new FormData();
+    fd.append('part', id);
+    fetch(`${apiBase}/api/active`, { method: 'POST', body: fd })
+      .then(() => refreshParts())
+      .catch(() => { /* offline → poll will reconcile */ });
+  }
+
   function selectPart(id: string) {
-    if (id === currentPartId) { drawerOpen = false; return; }
+    if (id === currentPartId) return;
     currentPartId = id;
     collapsed = { ...collapsed, [projectOf(id)]: false };
-    drawerOpen = false;
     saveStudioState();
+    // optimistic: show the tab + recency immediately (server reconciles)
+    const now = Date.now() / 1000;
+    parts = parts.map((p) =>
+      p.part_id === id
+        ? { ...p, open: true, last_active_at: now, opened_at: p.opened_at || now }
+        : p
+    );
+    markActive(id);
     // per-part saved camera/view (CADPersistence is keyed by persistenceId)
     try { viewerEl?.setAttribute?.('persistenceId', id); } catch { /* */ }
     if (mode === 'draw') exitDraw();
     loadModel({ isSwitch: true });
     wsSubscribe();
+  }
+
+  function closeTab(id: string) {
+    const wasActive = id === currentPartId;
+    const remaining = openTabs.filter((p) => p.part_id !== id);
+    parts = parts.map((p) =>
+      p.part_id === id ? { ...p, open: false, opened_at: 0 } : p
+    );
+    const fd = new FormData();
+    fd.append('part', id);
+    fetch(`${apiBase}/api/close`, { method: 'POST', body: fd })
+      .then(() => refreshParts())
+      .catch(() => { /* offline → poll will reconcile */ });
+    if (wasActive && remaining.length) {
+      selectPart(remaining[remaining.length - 1].part_id);
+    }
   }
 
   // ---- networking ------------------------------------------------------
@@ -248,8 +312,8 @@
 
   // ---- overlay sizing / drawing ---------------------------------------
   function sizeOverlay() {
-    if (!host || !overlay) return;
-    const r = host.getBoundingClientRect();
+    if (!mainEl || !overlay) return;
+    const r = mainEl.getBoundingClientRect();
     const dpr = Math.min(window.devicePixelRatio || 1, 2);
     overlay.width = Math.max(1, Math.round(r.width * dpr));
     overlay.height = Math.max(1, Math.round(r.height * dpr));
@@ -403,224 +467,318 @@
   }
 </script>
 
-<div class="studio" bind:this={host}>
-  <cad-viewer
-    bind:this={viewerEl}
-    viewerBackgroundColor={viewerBackgroundColor}
-    persistenceId="cad-studio"
-  ></cad-viewer>
-
-  <canvas
-    class="overlay"
-    class:active={mode === 'draw'}
-    bind:this={overlay}
-    on:pointerdown={onPointerDown}
-    on:pointermove={onPointerMove}
-    on:pointerup={onPointerUp}
-    on:pointercancel={onPointerUp}
-  ></canvas>
-
-  <!-- parts switcher -->
-  <button class="parts-toggle" on:click={() => (drawerOpen = !drawerOpen)}>
-    ☰ {currentPartId ? shortName(currentPartId) : 'Pièces'}
-  </button>
-
-  {#if drawerOpen}
-    <button class="scrim" aria-label="fermer" on:click={() => (drawerOpen = false)}></button>
-    <div class="drawer">
-      <div class="drawer-head">
-        <span>Pièces ({parts.length})</span>
-        <button class="x" on:click={() => (drawerOpen = false)}>✕</button>
-      </div>
-      {#each Object.entries(grouped) as [proj, list]}
-        <button class="proj" on:click={() => toggleProj(proj)}>
-          <span class="caret">{collapsed[proj] ? '▸' : '▾'}</span>
-          <span class="pj">{proj}</span>
-          <span class="count">{list.length}</span>
-        </button>
-        {#if !collapsed[proj]}
-          {#each list as p}
-            <button
-              class="part-btn"
-              class:active={p.part_id === currentPartId}
-              on:click={() => selectPart(p.part_id)}
-            >
-              <span class="dot2" class:on={p.loaded && p.build_ok} class:err={p.loaded && !p.build_ok}></span>
-              <span class="pname">{shortName(p.part_id)}</span>
-              {#if p.building}<span class="badge">build…</span>
-              {:else if p.pending_feedback}<span class="badge fb">{p.pending_feedback}</span>
-              {:else if p.loaded}<span class="badge v">v{p.version}</span>{/if}
-            </button>
-          {/each}
-        {/if}
+<div class="shell" bind:this={host} class:sb-open={sidebarOpen}>
+  <!-- title bar: app name + editor tabs + connection -->
+  <header class="titlebar">
+    <div class="brand">cad-studio</div>
+    <div class="tabs">
+      {#each openTabs as t (t.part_id)}
+        <div
+          class="tab"
+          class:active={t.part_id === currentPartId}
+          role="button"
+          tabindex="0"
+          on:click={() => selectPart(t.part_id)}
+          on:keydown={(e) => { if (e.key === 'Enter' || e.key === ' ') selectPart(t.part_id); }}
+        >
+          <span class="dot2" class:on={t.loaded && t.build_ok} class:err={t.loaded && !t.build_ok}></span>
+          <span class="tname">{shortName(t.part_id)}</span>
+          {#if t.building}<span class="tbadge">⏳</span>
+          {:else if t.pending_feedback}<span class="tbadge fb">{t.pending_feedback}</span>{/if}
+          <button class="tclose" aria-label="fermer l'onglet" on:click|stopPropagation={() => closeTab(t.part_id)}>✕</button>
+        </div>
       {/each}
     </div>
-  {/if}
+    <div class="title-right">
+      <span class="dot {wsState}"></span>
+      <span>{wsState === 'live' ? 'live' : wsState === 'connecting' ? '…' : 'hors-ligne'}</span>
+    </div>
+  </header>
 
-  {#if building}
-    <div class="spinner">⏳ Build de {currentPartId ? shortName(currentPartId) : ''}…</div>
-  {/if}
+  <!-- activity bar -->
+  <nav class="activitybar">
+    <button class:sel={activeView === 'parts' && sidebarOpen} title="Pièces" aria-label="Pièces" on:click={() => toggleView('parts')}>🗂</button>
+    <button class:sel={activeView === 'params' && sidebarOpen} title="Paramètres" aria-label="Paramètres" on:click={() => toggleView('params')}>⚙️</button>
+    <button class:sel={activeView === 'refs' && sidebarOpen} title="Références" aria-label="Références" on:click={() => toggleView('refs')}>🖼</button>
+  </nav>
 
-  <div class="bar">
-    {#if mode === 'nav'}
-      <button class="primary" on:click={enterDraw}>✏️ Annoter</button>
-      <label class="ref">
-        🖼 Référence
-        <input type="file" accept="image/*" on:change={onPickFile} />
-      </label>
-    {:else}
-      <div class="colors">
-        {#each COLORS as c}
-          <button
-            class="swatch"
-            class:sel={inkColor === c}
-            style="background:{c}"
-            aria-label="couleur"
-            on:click={() => (inkColor = c)}
-          ></button>
+  <!-- sidebar -->
+  <aside class="sidebar">
+    {#if activeView === 'parts'}
+      <div class="side-head">Explorer · {parts.length} pièces</div>
+      <div class="side-scroll">
+        {#if recents.length}
+          <div class="group-label">Récentes</div>
+          {#each recents as p}
+            <button class="part-btn" class:active={p.part_id === currentPartId} on:click={() => selectPart(p.part_id)}>
+              <span class="dot2" class:on={p.loaded && p.build_ok} class:err={p.loaded && !p.build_ok}></span>
+              <span class="pname">{shortName(p.part_id)}</span>
+              {#if p.open}<span class="badge open">●</span>
+              {:else if p.pending_feedback}<span class="badge fb">{p.pending_feedback}</span>{/if}
+            </button>
+          {/each}
+          <div class="group-sep"></div>
+        {/if}
+        {#each Object.entries(grouped) as [proj, list]}
+          <button class="proj" on:click={() => toggleProj(proj)}>
+            <span class="caret">{collapsed[proj] ? '▸' : '▾'}</span>
+            <span class="pj">{proj}</span>
+            <span class="count">{list.length}</span>
+          </button>
+          {#if !collapsed[proj]}
+            {#each list as p}
+              <button class="part-btn" class:active={p.part_id === currentPartId} on:click={() => selectPart(p.part_id)}>
+                <span class="dot2" class:on={p.loaded && p.build_ok} class:err={p.loaded && !p.build_ok}></span>
+                <span class="pname">{shortName(p.part_id)}</span>
+                {#if p.building}<span class="badge">build…</span>
+                {:else if p.pending_feedback}<span class="badge fb">{p.pending_feedback}</span>
+                {:else if p.loaded}<span class="badge v">v{p.version}</span>{/if}
+              </button>
+            {/each}
+          {/if}
         {/each}
       </div>
-      <button on:click={undo} disabled={strokes.length === 0}>↶ Annuler</button>
-      <button on:click={clearInk} disabled={strokes.length === 0}>Effacer</button>
-      <input class="note" placeholder="Note pour Claude (ex: +2mm ce trou)" bind:value={note} />
-      <button class="primary" on:click={send} disabled={sending}>
-        {sending ? '…' : '➤ Envoyer'}
-      </button>
-      <button on:click={exitDraw}>✕</button>
+    {:else if activeView === 'params'}
+      <div class="side-head">Paramètres</div>
+      <div class="side-empty">Bientôt — sliders &amp; toggles des modèles paramétriques (phase 3).</div>
+    {:else}
+      <div class="side-head">Références</div>
+      <div class="side-empty">Bientôt — bibliothèque d'images de référence partagée avec Claude (phase 2).</div>
     {/if}
-  </div>
+  </aside>
 
-  <div class="status">
+  <!-- main: the viewer pane (cad-viewer keeps its own toolbar/gizmo here) -->
+  <main class="main" bind:this={mainEl}>
+    <cad-viewer
+      bind:this={viewerEl}
+      viewerBackgroundColor={viewerBackgroundColor}
+      persistenceId="cad-studio"
+    ></cad-viewer>
+
+    <canvas
+      class="overlay"
+      class:active={mode === 'draw'}
+      bind:this={overlay}
+      on:pointerdown={onPointerDown}
+      on:pointermove={onPointerMove}
+      on:pointerup={onPointerUp}
+      on:pointercancel={onPointerUp}
+    ></canvas>
+
+    {#if building}
+      <div class="spinner">⏳ Build de {currentPartId ? shortName(currentPartId) : ''}…</div>
+    {/if}
+
+    <div class="toolbar" class:drawing={mode === 'draw'}>
+      {#if mode === 'nav'}
+        <button class="primary" on:click={enterDraw}>✏️ Annoter</button>
+        <label class="ref">
+          🖼 Référence
+          <input type="file" accept="image/*" on:change={onPickFile} />
+        </label>
+      {:else}
+        <div class="colors">
+          {#each COLORS as c}
+            <button class="swatch" class:sel={inkColor === c} style="background:{c}" aria-label="couleur" on:click={() => (inkColor = c)}></button>
+          {/each}
+        </div>
+        <button on:click={undo} disabled={strokes.length === 0}>↶ Annuler</button>
+        <button on:click={clearInk} disabled={strokes.length === 0}>Effacer</button>
+        <input class="note" placeholder="Note pour Claude (ex: +2mm ce trou)" bind:value={note} />
+        <button class="primary" on:click={send} disabled={sending}>{sending ? '…' : '➤ Envoyer'}</button>
+        <button on:click={exitDraw}>✕</button>
+      {/if}
+    </div>
+
+    {#if toast}<div class="toast">{toast}</div>{/if}
+  </main>
+
+  <!-- status bar -->
+  <footer class="statusbar">
     <span class="dot {wsState}"></span>
-    {wsState === 'live' ? `live · v${version}` : wsState === 'connecting' ? 'connexion…' : 'hors-ligne'}
-    {#if currentPartId} · {shortName(currentPartId)}{/if}
-    {#if kind === 'reference'} · réf{/if}
-    {#if pickedNode} · ⌖ {pickedNode}{/if}
-  </div>
-
-  {#if toast}<div class="toast">{toast}</div>{/if}
+    <span>{wsState === 'live' ? `live · v${version}` : wsState === 'connecting' ? 'connexion…' : 'hors-ligne'}</span>
+    {#if currentPartId}<span class="sb-sep">·</span><span>{shortName(currentPartId)}</span>{/if}
+    {#if kind === 'reference'}<span class="sb-sep">·</span><span>réf</span>{/if}
+    {#if pickedNode}<span class="sb-sep">·</span><span>⌖ {pickedNode}</span>{/if}
+    <span class="sb-spacer"></span>
+    <button class="sb-toggle" title="Basculer la sidebar" on:click={() => { sidebarOpen = !sidebarOpen; saveStudioState(); }}>
+      {sidebarOpen ? '◧' : '▢'} panneau
+    </button>
+  </footer>
 </div>
 
 <style>
-  .studio { position: relative; width: 100%; height: 100%; overflow: hidden;
-    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; }
-  cad-viewer { position: absolute; inset: 0; width: 100%; height: 100%; display: block; }
+  :host { display: block; width: 100%; height: 100%; }
 
-  .overlay {
-    position: absolute; inset: 0; touch-action: none;
-    pointer-events: none;
+  /* ── VSCode-like shell: title / [activity | sidebar | main] / status ── */
+  .shell {
+    position: relative; width: 100%; height: 100%; overflow: hidden;
+    display: grid;
+    grid-template-columns: 48px 260px 1fr;
+    grid-template-rows: 40px 1fr 26px;
+    grid-template-areas:
+      "title  title  title"
+      "act    side   main"
+      "status status status";
+    background: #1a1a1c; color: #e2e2e4;
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+    font-size: 14px;
   }
-  .overlay.active { pointer-events: auto; cursor: crosshair; }
+  .shell:not(.sb-open) { grid-template-columns: 48px 0 1fr; }
 
-  .parts-toggle {
-    position: absolute; top: 12px; right: 12px; z-index: 26;
-    background: rgba(28,28,30,0.9); color: #fff; border: 1px solid #4a4a4c;
-    border-radius: 10px; padding: 0 16px; min-height: 48px; font-size: 16px;
-    cursor: pointer; max-width: 56vw; overflow: hidden; text-overflow: ellipsis;
-    white-space: nowrap;
+  /* title bar */
+  .titlebar {
+    grid-area: title; display: flex; align-items: stretch; gap: 8px;
+    background: #202022; border-bottom: 1px solid #2c2c2e; padding: 0 10px;
+    min-width: 0;
   }
-  .scrim {
-    position: absolute; inset: 0; z-index: 24; background: rgba(0,0,0,0.35);
-    border: none; padding: 0; cursor: pointer;
+  .brand { display: flex; align-items: center; font-weight: 600; color: #cfcfd2;
+    font-size: 13px; padding-right: 6px; flex: 0 0 auto; }
+  .titlebar .tabs {
+    display: flex; align-items: flex-end; gap: 4px; flex: 1 1 auto; min-width: 0;
+    overflow-x: auto; scrollbar-width: none;
   }
-  .drawer {
-    position: absolute; top: 0; right: 0; bottom: 0; z-index: 25;
-    width: min(360px, 84vw); overflow-y: auto;
-    background: rgba(20,20,22,0.98); backdrop-filter: blur(10px);
-    border-left: 1px solid #3a3a3c; padding: 10px;
-    -webkit-overflow-scrolling: touch;
+  .titlebar .tabs::-webkit-scrollbar { display: none; }
+  .tab {
+    display: inline-flex; align-items: center; gap: 7px; flex: 0 0 auto;
+    height: 30px; align-self: center; background: #2a2a2c; color: #b9b9bd;
+    border: 1px solid #333; border-radius: 7px 7px 0 0; padding: 0 4px 0 10px;
+    font-size: 13px; cursor: pointer; max-width: 200px;
   }
-  .drawer-head {
-    display: flex; align-items: center; justify-content: space-between;
-    color: #ddd; font-size: 15px; font-weight: 600; padding: 6px 6px 10px;
+  .tab.active { background: #1a1a1c; color: #fff; border-color: #0a84ff;
+    box-shadow: inset 0 2px 0 #0a84ff; }
+  .tab .tname { overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    max-width: 120px; }
+  .tab .tbadge { font-size: 11px; background: #333; border-radius: 5px; padding: 1px 6px; }
+  .tab .tbadge.fb { background: #b3261e; color: #fff; }
+  .tclose { background: none; border: none; color: inherit; opacity: 0.5;
+    cursor: pointer; font-size: 13px; min-width: 24px; height: 24px;
+    border-radius: 5px; padding: 0; line-height: 1; }
+  .tclose:hover { opacity: 1; background: rgba(255,255,255,0.14); }
+  .title-right { display: flex; align-items: center; gap: 6px; flex: 0 0 auto;
+    color: #9a9a9e; font-size: 12px; }
+
+  /* activity bar */
+  .activitybar {
+    grid-area: act; background: #18181a; border-right: 1px solid #2c2c2e;
+    display: flex; flex-direction: column; align-items: center; gap: 4px;
+    padding-top: 8px;
   }
-  .drawer-head .x {
-    background: #3a3a3c; color: #fff; border: 1px solid #555;
-    border-radius: 8px; min-width: 40px; min-height: 40px; font-size: 16px;
-    cursor: pointer;
+  .activitybar button {
+    width: 40px; height: 40px; background: none; border: none; cursor: pointer;
+    font-size: 19px; border-radius: 9px; opacity: 0.55; color: #fff;
+    border-left: 2px solid transparent;
   }
+  .activitybar button:hover { opacity: 1; background: #242426; }
+  .activitybar button.sel { opacity: 1; background: #242426; border-left-color: #0a84ff; }
+
+  /* sidebar */
+  .sidebar {
+    grid-area: side; background: #1e1e20; border-right: 1px solid #2c2c2e;
+    display: flex; flex-direction: column; min-width: 0; overflow: hidden;
+  }
+  .shell:not(.sb-open) .sidebar { display: none; }
+  .side-head { padding: 10px 12px; font-size: 11px; text-transform: uppercase;
+    letter-spacing: .6px; color: #8a8a8e; border-bottom: 1px solid #262628; flex: 0 0 auto; }
+  .side-scroll { flex: 1 1 auto; overflow-y: auto; padding: 6px;
+    -webkit-overflow-scrolling: touch; }
+  .side-empty { padding: 16px 14px; color: #6f6f73; font-size: 13px; line-height: 1.5; }
+  .group-label { color: #8a8a8e; font-size: 11px; text-transform: uppercase;
+    letter-spacing: .5px; padding: 8px 8px 4px; }
+  .group-sep { height: 1px; background: #2c2c2e; margin: 8px 4px; }
   .proj {
-    display: flex; align-items: center; gap: 10px; width: 100%;
-    background: #242426; color: #cfcfd2; border: 1px solid #333;
-    border-radius: 9px; margin: 6px 0 2px; padding: 0 12px; min-height: 50px;
-    font-size: 14px; text-transform: uppercase; letter-spacing: .5px;
-    cursor: pointer;
+    display: flex; align-items: center; gap: 9px; width: 100%;
+    background: #242426; color: #cfcfd2; border: 1px solid #2e2e30;
+    border-radius: 8px; margin: 5px 0 2px; padding: 0 10px; min-height: 40px;
+    font-size: 13px; text-transform: uppercase; letter-spacing: .4px; cursor: pointer;
   }
-  .proj .caret { width: 14px; color: #8a8a8e; }
+  .proj .caret { width: 12px; color: #8a8a8e; }
   .proj .pj { flex: 1; text-align: left; }
-  .proj .count { font-size: 12px; color: #888; background: #1c1c1e;
-    border-radius: 6px; padding: 3px 8px; }
+  .proj .count { font-size: 11px; color: #888; background: #1c1c1e;
+    border-radius: 5px; padding: 2px 7px; }
   .part-btn {
-    display: flex; align-items: center; gap: 10px; width: 100%;
-    background: none; border: none; color: #e2e2e4; text-align: left;
-    padding: 0 12px 0 26px; border-radius: 9px; cursor: pointer;
-    font-size: 16px; min-height: 54px;
+    display: flex; align-items: center; gap: 9px; width: 100%;
+    background: none; border: none; color: #d8d8da; text-align: left;
+    padding: 0 10px 0 22px; border-radius: 8px; cursor: pointer;
+    font-size: 14px; min-height: 40px;
   }
-  .part-btn:active { background: #2c2c2e; }
+  .part-btn:hover { background: #242426; }
   .part-btn.active { background: #0a4a8a; color: #fff; }
   .pname { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .dot2 { width: 10px; height: 10px; border-radius: 50%; background: #555; flex: 0 0 auto; }
+  .dot2 { width: 9px; height: 9px; border-radius: 50%; background: #555; flex: 0 0 auto; }
   .dot2.on { background: #34c759; }
   .dot2.err { background: #ff3b30; }
-  .badge { font-size: 12px; color: #999; background: #333; border-radius: 6px;
-    padding: 3px 8px; }
+  .badge { font-size: 11px; color: #999; background: #333; border-radius: 5px; padding: 2px 7px; }
   .badge.fb { background: #b3261e; color: #fff; }
   .badge.v { background: #2a2a2c; }
+  .badge.open { background: #1f6f3a; color: #fff; }
+
+  /* main viewer pane — cad-viewer + its own toolbar/gizmo live here */
+  .main { grid-area: main; position: relative; min-width: 0; overflow: hidden; }
+  cad-viewer { position: absolute; inset: 0; width: 100%; height: 100%; display: block; }
+  .overlay { position: absolute; inset: 0; touch-action: none; pointer-events: none; }
+  .overlay.active { pointer-events: auto; cursor: crosshair; }
 
   .spinner {
     position: absolute; top: 50%; left: 50%; transform: translate(-50%,-50%);
     z-index: 22; background: rgba(28,28,30,0.92); color: #fff;
-    padding: 12px 20px; border-radius: 10px; font-size: 15px;
-    border: 1px solid #3a3a3c;
+    padding: 12px 20px; border-radius: 10px; font-size: 15px; border: 1px solid #3a3a3c;
   }
 
-  .bar {
-    position: absolute; left: 50%; bottom: 16px; transform: translateX(-50%);
+  /* bottom toolbar of the viewer pane (nav actions ↔ draw palette) */
+  .toolbar {
+    position: absolute; left: 50%; bottom: 14px; transform: translateX(-50%);
     display: flex; gap: 8px; align-items: center; flex-wrap: wrap;
-    max-width: 96vw; padding: 8px 10px; border-radius: 12px;
-    background: rgba(28,28,30,0.86); backdrop-filter: blur(8px);
+    max-width: calc(100% - 24px); padding: 7px 9px; border-radius: 12px;
+    background: rgba(24,24,26,0.92); backdrop-filter: blur(8px);
     border: 1px solid #3a3a3c; z-index: 20;
   }
-  /* Tous les contrôles du bas partagent la même base (taille, radius, font,
-     bordure) — seule la couleur de fond change selon l'emphase. */
-  .bar button, .bar .ref, .bar .note {
-    display: inline-flex; align-items: center; justify-content: center;
-    gap: 8px;
+  .toolbar button, .toolbar .ref, .toolbar .note {
+    display: inline-flex; align-items: center; justify-content: center; gap: 8px;
     background: #2c2c2e; color: #fff; border: 1px solid #4a4a4c;
-    border-radius: 10px; padding: 0 16px; min-height: 48px; font-size: 15px;
-    font-family: inherit; line-height: 1; cursor: pointer;
-    box-sizing: border-box;
+    border-radius: 9px; padding: 0 14px; min-height: 44px; font-size: 14px;
+    font-family: inherit; line-height: 1; cursor: pointer; box-sizing: border-box;
   }
-  .bar button:disabled { opacity: 0.4; cursor: default; }
-  .bar button.primary {
-    background: #0a84ff; border-color: #0a84ff; font-weight: 600;
-  }
-  .bar .ref { position: relative; overflow: hidden; }
-  .bar .ref input { position: absolute; inset: 0; opacity: 0; cursor: pointer; }
-  .bar .note {
-    background: #1c1c1e; cursor: text;
-    width: min(46vw, 320px); justify-content: flex-start;
-    padding: 0 14px;
-  }
+  .toolbar button:disabled { opacity: 0.4; cursor: default; }
+  .toolbar button.primary { background: #0a84ff; border-color: #0a84ff; font-weight: 600; }
+  .toolbar .ref { position: relative; overflow: hidden; }
+  .toolbar .ref input { position: absolute; inset: 0; opacity: 0; cursor: pointer; }
+  .toolbar .note { background: #1c1c1e; cursor: text; width: min(40vw, 300px);
+    justify-content: flex-start; padding: 0 14px; }
   .colors { display: flex; gap: 6px; }
-  .swatch { width: 30px; height: 30px; min-height: 30px; border-radius: 50%;
-    padding: 0; border: 2px solid #1c1c1e; }
+  .swatch { width: 28px; height: 28px; min-height: 28px; border-radius: 50%;
+    padding: 0; border: 2px solid #1c1c1e; cursor: pointer; }
   .swatch.sel { border-color: #fff; }
 
-  .status {
-    position: absolute; top: 12px; left: 12px; z-index: 20;
-    font-size: 12px; color: #ddd; background: rgba(28,28,30,0.7);
-    padding: 5px 9px; border-radius: 7px; display: flex; align-items: center; gap: 6px;
+  /* status bar */
+  .statusbar {
+    grid-area: status; display: flex; align-items: center; gap: 7px;
+    background: #0a84ff; color: #fff; padding: 0 12px; font-size: 12px;
+    overflow: hidden; white-space: nowrap;
   }
-  .dot { width: 8px; height: 8px; border-radius: 50%; background: #777; }
-  .dot.live { background: #34c759; }
+  .statusbar .sb-sep { opacity: 0.7; }
+  .sb-spacer { flex: 1 1 auto; }
+  .sb-toggle { background: rgba(255,255,255,0.16); color: #fff; border: none;
+    border-radius: 6px; padding: 3px 10px; font-size: 12px; cursor: pointer; }
+  .sb-toggle:hover { background: rgba(255,255,255,0.28); }
+
+  .dot { width: 8px; height: 8px; border-radius: 50%; background: #fff; flex: 0 0 auto; }
+  .dot.live { background: #30d158; }
   .dot.connecting { background: #ffd60a; }
-  .dot.down { background: #ff3b30; }
+  .dot.down { background: #ff453a; }
 
   .toast {
     position: absolute; top: 12px; left: 50%; transform: translateX(-50%);
-    z-index: 30; background: rgba(28,28,30,0.92); color: #fff;
-    padding: 9px 16px; border-radius: 9px; font-size: 14px;
-    border: 1px solid #3a3a3c;
+    z-index: 30; background: rgba(28,28,30,0.95); color: #fff;
+    padding: 9px 16px; border-radius: 9px; font-size: 14px; border: 1px solid #3a3a3c;
+  }
+
+  /* narrow screens (tablet portrait): sidebar overlays instead of pushing */
+  @media (max-width: 720px) {
+    .shell, .shell.sb-open { grid-template-columns: 48px 0 1fr; }
+    .shell.sb-open .sidebar {
+      display: flex; position: absolute; left: 48px; top: 40px; bottom: 26px;
+      width: 260px; z-index: 40; box-shadow: 4px 0 16px rgba(0,0,0,0.5);
+    }
   }
 </style>

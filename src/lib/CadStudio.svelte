@@ -49,10 +49,11 @@
   let bg: HTMLImageElement | null = null;
 
   // ---- reference library (server-persisted, per part) ----
-  interface RefInfo { id: number; label: string; note: string; bytes: number; created_at: number; url: string; }
+  interface RefInfo { id: number; label: string; note: string; bytes: number; created_at: number; url: string; px_per_mm?: number; }
   let refs: RefInfo[] = [];
   let lastRefBlob: Blob | null = null; // a freshly loaded ref not yet kept
   let keeping = false;
+  let refsBadge = false;  // new ref(s) arrived while the 🖼 panel is closed
   // ---- reference compare dock (ref shown beside/under the live viewer) ----
   let compareRef: { src: string; label: string; id: number | null; pxPerMm?: number } | null = null;
   let refImg: HTMLImageElement | null = null; // decoded ref, for canvas compositing
@@ -123,7 +124,7 @@
     // Click the active icon → collapse; click another → switch & open.
     if (sidebarOpen && activeView === v) sidebarOpen = false;
     else { activeView = v; sidebarOpen = true; }
-    if (v === 'refs') refreshRefs();
+    if (v === 'refs') { refreshRefs(); refsBadge = false; }
     if (v === 'params') refreshParams();
     saveStudioState();
   }
@@ -325,6 +326,9 @@
           stopBuilding();
           showToast('⚠ build123d a échoué — voir le terminal');
           refreshParts();
+        } else if (msg.type === 'refs') {
+          // Claude (or another tablet) changed this part's reference library.
+          if (msg.part === currentPartId) onRefsChanged(msg);
         }
       } catch { /* ignore */ }
     };
@@ -676,6 +680,20 @@
     } catch { /* keep last */ }
   }
 
+  // A ref was pushed (by Claude) or changed. Refresh the list; toast + badge,
+  // or auto-open the new ref in the compare dock if Claude asked to focus it.
+  async function onRefsChanged(msg: { id?: number; label?: string; focus?: boolean }) {
+    await refreshRefs();
+    if (msg.id != null && msg.focus) {
+      const rf = refs.find((r) => r.id === msg.id);
+      if (rf) { activeView = 'refs'; sidebarOpen = true; loadReferenceFromLibrary(rf); }
+      showToast(`🖼 Claude a ouvert ${msg.label || 'une référence'}`);
+    } else if (msg.id != null) {
+      showToast(`🖼 Claude a ajouté ${msg.label || 'une référence'}`);
+      if (activeView !== 'refs' || !sidebarOpen) refsBadge = true;
+    }
+  }
+
   function loadReferenceFromLibrary(rf: RefInfo) {
     openCompare(`${apiBase}${rf.url}`, rf.label, rf.id, null, (rf as any).px_per_mm);
   }
@@ -770,6 +788,11 @@
       fd.append('picked_node', pickedNodes[0] || '');
       fd.append('picked_nodes', JSON.stringify(pickedNodes));
       fd.append('kind', kind);
+      // if annotating a docked reference, tell Claude which one
+      if (compareRef && compareRef.id != null) {
+        fd.append('ref_id', String(compareRef.id));
+        fd.append('ref_label', compareRef.label || '');
+      }
       const r = await fetch(`${apiBase}/api/feedback`, { method: 'POST', body: fd });
       if (!r.ok) throw new Error('HTTP ' + r.status);
       const j = await r.json();
@@ -831,7 +854,9 @@
   <nav class="activitybar">
     <button class:sel={activeView === 'parts' && sidebarOpen} title="Pièces" aria-label="Pièces" on:click={() => toggleView('parts')}>🗂</button>
     <button class:sel={activeView === 'params' && sidebarOpen} title="Paramètres" aria-label="Paramètres" on:click={() => toggleView('params')}>⚙️</button>
-    <button class:sel={activeView === 'refs' && sidebarOpen} title="Références" aria-label="Références" on:click={() => toggleView('refs')}>🖼</button>
+    <button class="actbtn" class:sel={activeView === 'refs' && sidebarOpen} title="Références" aria-label="Références" on:click={() => toggleView('refs')}>
+      🖼{#if refsBadge}<span class="act-badge"></span>{/if}
+    </button>
   </nav>
 
   <!-- sidebar -->
@@ -1131,6 +1156,9 @@
   }
   .activitybar button:hover { opacity: 1; background: #242426; }
   .activitybar button.sel { opacity: 1; background: #242426; border-left-color: #0a84ff; }
+  .activitybar .actbtn { position: relative; }
+  .act-badge { position: absolute; top: 6px; right: 6px; width: 8px; height: 8px;
+    border-radius: 50%; background: #ff453a; }
 
   /* sidebar */
   .sidebar {

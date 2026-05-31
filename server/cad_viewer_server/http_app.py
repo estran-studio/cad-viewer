@@ -153,6 +153,8 @@ def create_app(registry: Registry) -> FastAPI:
         picked_node: str = Form(""),
         picked_nodes: str = Form(""),  # JSON array of node names (multi-region)
         kind: str = Form("annotation"),
+        ref_id: str = Form(""),        # which library ref was annotated (if any)
+        ref_label: str = Form(""),
     ) -> JSONResponse:
         ps = registry.resolve(part)
         if ps is None:
@@ -165,10 +167,14 @@ def create_app(registry: Registry) -> FastAPI:
                     nodes = [str(n) for n in parsed if n]
             except ValueError:
                 pass
+        try:
+            rid = int(ref_id) if ref_id else None
+        except ValueError:
+            rid = None
         png = await image.read()
         fb = ps.add_feedback(
             png=png, note=note, picked_node=picked_node or None, kind=kind,
-            picked_nodes=nodes or None,
+            picked_nodes=nodes or None, ref_id=rid, ref_label=ref_label,
         )
         return JSONResponse(
             {"status": "ok", "id": fb.id, "part": ps.part_id, "bytes": len(png)}
@@ -275,6 +281,10 @@ def create_app(registry: Registry) -> FastAPI:
             return JSONResponse({"error": "unknown part", "part": part}, status_code=404)
         png = await image.read()
         rec = registry.references.add(ps.part_id, png, label=label, note=note)
+        registry.hub.publish(ps.part_id, {
+            "type": "refs", "part": ps.part_id, "id": rec["id"],
+            "label": rec["label"], "focus": False,
+        })
         return JSONResponse({"status": "ok", "part": ps.part_id, **rec})
 
     @app.post("/api/references/calibration")
@@ -297,6 +307,8 @@ def create_app(registry: Registry) -> FastAPI:
         if ps is None:
             return JSONResponse({"error": "unknown part", "part": part}, status_code=404)
         ok = registry.references.delete(ps.part_id, id)
+        if ok:
+            registry.hub.publish(ps.part_id, {"type": "refs", "part": ps.part_id})
         return JSONResponse({"status": "ok" if ok else "not_found", "id": id})
 
     @app.websocket("/ws")

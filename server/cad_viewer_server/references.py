@@ -91,6 +91,21 @@ class ReferenceStore:
         log.info("[%s] reference #%d kept (%d bytes)", part_id, rec["id"], len(png))
         return rec
 
+    _MAX_BYTES = 12 * 1024 * 1024  # 12 MB guard for path-based push
+
+    def add_from_path(self, part_id: str, path: str, label: str = "", note: str = "") -> dict:
+        """Add a reference by reading an image file (used by Claude's
+        push_reference over MCP). Raises FileNotFoundError / ValueError."""
+        p = Path(path)
+        if not p.is_file():
+            raise FileNotFoundError(path)
+        size = p.stat().st_size
+        if size > self._MAX_BYTES:
+            raise ValueError(f"file too large ({size} bytes > {self._MAX_BYTES})")
+        png = p.read_bytes()
+        # default label = filename stem if none given
+        return self.add(part_id, png, label=label or p.stem, note=note)
+
     def list(self, part_id: str) -> list[dict]:
         with self._lock:
             return self._load_index(part_id)

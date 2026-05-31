@@ -7,7 +7,10 @@ they never freeze the shared event loop, and serialize on the global build
 lock (OCP is not thread-safe).
 
 Tools: list_parts, select_part, open_part, list_feedback,
-get_annotated_feedback, get_current_render, rebuild_part, get_part_info.
+get_annotated_feedback, get_current_render, rebuild_part, get_part_info,
+get_references, push_reference, compare_to_ref, add_reference_note,
+check_part, list_nodes, measure_distance, cross_section,
+get_part_params, set_part_params, apply_param_preset.
 """
 
 from __future__ import annotations
@@ -185,6 +188,9 @@ def build_mcp(registry: Registry) -> FastMCP:
             "note": fb.note,
             "picked_node": fb.picked_node,
             "picked_nodes": fb.picked_nodes,
+            "annotated_reference": (
+                {"id": fb.ref_id, "label": fb.ref_label} if fb.ref_id is not None else None
+            ),
             "model_version": fb.model_version,
             "age_s": round(time.time() - fb.created_at, 1),
             "remaining_unconsumed": sum(
@@ -240,6 +246,47 @@ def build_mcp(registry: Registry) -> FastMCP:
             return err
         ok = registry.references.set_note(ps.part_id, ref_id, note)
         return f"{'OK' if ok else 'introuvable'}: réf #{ref_id} sur {ps.part_id}"
+
+    @mcp.tool()
+    def push_reference(
+        path: str | None = None, image_base64: str | None = None,
+        label: str = "", note: str = "", focus: bool = False,
+        part: str | None = None, ctx: Context = None,  # type: ignore[assignment]
+    ) -> str:
+        """Push an image into a part's reference library so the user can OPEN
+        and ANNOTATE it on the tablet (e.g. a blueprint you just rendered).
+
+        Provide EITHER `path` (a file on disk — works for paths under the mounted
+        project tree, identical host/container path) OR `image_base64` (raw PNG
+        bytes, base64; use for files outside mounts like /tmp). `label` names it
+        (defaults to the filename). `focus=True` auto-opens it on the tablet;
+        else the user gets a toast + a badge on the 🖼 panel. The user's
+        annotation comes back via get_annotated_feedback with this ref's label.
+        """
+        ps, err = _need(part, ctx)
+        if err:
+            return err
+        try:
+            if path:
+                rec = registry.references.add_from_path(ps.part_id, path, label=label, note=note)
+            elif image_base64:
+                raw = base64.b64decode(image_base64)
+                rec = registry.references.add(ps.part_id, raw, label=label or "image", note=note)
+            else:
+                return "Fournis `path` ou `image_base64`."
+        except FileNotFoundError:
+            return f"Fichier introuvable: {path}"
+        except Exception as exc:  # noqa: BLE001
+            return f"Échec push: {type(exc).__name__}: {exc}"
+        registry.hub.publish(ps.part_id, {
+            "type": "refs", "part": ps.part_id, "id": rec["id"],
+            "label": rec["label"], "focus": bool(focus),
+        })
+        return json.dumps(
+            {"status": "ok", "part": ps.part_id, "id": rec["id"],
+             "label": rec["label"], "focus": bool(focus)},
+            ensure_ascii=False,
+        )
 
     @mcp.tool()
     async def compare_to_ref(

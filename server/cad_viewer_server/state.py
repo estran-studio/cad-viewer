@@ -34,6 +34,8 @@ class Feedback:
     model_version: int = 0
     kind: str = "annotation"  # "annotation" | "reference"
     part_id: str = ""
+    ref_id: int | None = None        # which reference image was annotated (if any)
+    ref_label: str = ""
     consumed: bool = False
 
     def summary(self) -> dict:
@@ -48,6 +50,8 @@ class Feedback:
             "model_version": self.model_version,
             "kind": self.kind,
             "part_id": self.part_id,
+            "ref_id": self.ref_id,
+            "ref_label": self.ref_label,
             "consumed": self.consumed,
             "png_bytes": len(self.png),
         }
@@ -269,6 +273,8 @@ class PartState:
         picked_node: str | None,
         kind: str,
         picked_nodes: list[str] | None = None,
+        ref_id: int | None = None,
+        ref_label: str = "",
     ) -> Feedback:
         nodes = list(picked_nodes) if picked_nodes else ([picked_node] if picked_node else [])
         with self.lock:
@@ -282,6 +288,8 @@ class PartState:
                 model_version=self.version,
                 kind=kind or "annotation",
                 part_id=self.part_id,
+                ref_id=ref_id,
+                ref_label=ref_label or "",
             )
             self.feedback_queue.append(fb)
             if len(self.feedback_queue) > 50:

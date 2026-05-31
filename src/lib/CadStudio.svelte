@@ -826,6 +826,19 @@
       <button class:on={dimsOn} on:click={toggleDims} title="Boîte de cotes (mm)">📐 Cotes</button>
       <button on:click={tbExport} title="Export PNG">⤓ PNG</button>
     </div>
+    <div class="viewctl actions">
+      <button class="act-annotate" class:on={mode === 'draw'} on:click={() => (mode === 'draw' ? exitDraw() : enterDraw())} title="Annoter le modèle">✏️ Annoter</button>
+      {#if histVersions.length || diffOn}
+        <button class:on={diffOn} on:click={toggleDiff} title="Comparer avec une version précédente">
+          👻 Diff{#if diffOn && ghostVersion != null} v{ghostVersion}{/if}
+        </button>
+      {/if}
+      {#if diffOn && histVersions.length > 1}
+        <select class="diff-sel" value={ghostVersion} on:change={(e) => loadGhost(Number((e.target as HTMLSelectElement).value))}>
+          {#each histVersions as v}<option value={v}>v{v}</option>{/each}
+        </select>
+      {/if}
+    </div>
     <div class="tabs">
       {#each openTabs as t (t.part_id)}
         <div
@@ -1034,24 +1047,9 @@
       </div>
     {/if}
 
-    <div class="toolbar" class:drawing={mode === 'draw'}>
-      {#if mode === 'nav'}
-        <button class="primary" on:click={enterDraw}>✏️ Annoter</button>
-        <label class="ref">
-          🖼 Référence
-          <input type="file" accept="image/*" on:change={onPickFile} />
-        </label>
-        {#if histVersions.length || diffOn}
-          <button class:primary={diffOn} on:click={toggleDiff} title="Comparer avec une version précédente">
-            👻 Diff{#if diffOn && ghostVersion != null} v{ghostVersion}{/if}
-          </button>
-        {/if}
-        {#if diffOn && histVersions.length > 1}
-          <select class="diff-sel" value={ghostVersion} on:change={(e) => loadGhost(Number((e.target as HTMLSelectElement).value))}>
-            {#each histVersions as v}<option value={v}>v{v}</option>{/each}
-          </select>
-        {/if}
-      {:else}
+    {#if mode === 'draw'}
+      <!-- drawing palette: only while annotating, near where you draw -->
+      <div class="toolbar drawing">
         <div class="colors">
           {#each COLORS as c}
             <button class="swatch" class:sel={inkColor === c} style="background:{c}" aria-label="couleur" on:click={() => (inkColor = c)}></button>
@@ -1062,8 +1060,8 @@
         <input class="note" placeholder="Note pour Claude (ex: +2mm ce trou)" bind:value={note} />
         <button class="primary" on:click={send} disabled={sending}>{sending ? '…' : '➤ Envoyer'}</button>
         <button on:click={exitDraw}>✕</button>
-      {/if}
-    </div>
+      </div>
+    {/if}
 
     {#if toast}<div class="toast">{toast}</div>{/if}
   </main>

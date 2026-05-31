@@ -26,6 +26,9 @@ export class SceneManager {
   private ghostObject: THREE.Object3D | null = null; // previous-version overlay (diff)
   private dimGroup: THREE.Group | null = null;       // bounding box + size labels
   private dimVisible = false;
+  // build123d exports GLB in METRES (glTF convention) but STL/3MF in mm; this
+  // factor converts a three.js-unit length to millimetres for size labels.
+  private mmPerUnit = 1;
   public gridHelper!: THREE.GridHelper;
   private gridSize = 100;
   private gridDivisions = 100;
@@ -323,12 +326,13 @@ export class SceneManager {
       0
     );
 
+    const k = this.mmPerUnit;
     return {
       triangleCount,
       dimensions: {
-        x: size.x.toFixed(2),
-        y: size.y.toFixed(2),
-        z: size.z.toFixed(2)
+        x: (size.x * k).toFixed(2),
+        y: (size.y * k).toFixed(2),
+        z: (size.z * k).toFixed(2)
       }
     };
   }
@@ -393,6 +397,10 @@ export class SceneManager {
   ): Promise<ModelInfo> {
     this.clearCurrentModel();
     const meshes: THREE.Mesh[] = [];
+    // build123d exports GLB in METRES (glTF convention) but STL/3MF in mm.
+    // We do NOT rescale geometry (camera near/far + saved per-part cameras are
+    // tuned to the current units) — only the dimension labels convert to mm.
+    this.mmPerUnit = payloadType === 'glb' ? 1000 : 1;
 
     if (payloadType === 'glb') {
       const gltf = await new Promise<any>((resolve, reject) =>
@@ -514,7 +522,8 @@ export class SceneManager {
     // X = red, Y = green, Z = blue) + a coloured size label on each.
     const m = box.min, mx = box.max;
     const X = 0xe5484d, Y = 0x30a46c, Z = 0x0a84ff;
-    const fmt = (v: number) => (v >= 100 ? v.toFixed(0) : v.toFixed(1)) + ' mm';
+    const fmt = (u: number) => { const v = u * this.mmPerUnit;
+      return (v >= 10 ? v.toFixed(0) : v.toFixed(1)) + ' mm'; };
     const seg = (a: THREE.Vector3, b: THREE.Vector3, color: number) => {
       const g = new THREE.BufferGeometry().setFromPoints([a, b]);
       const line = new THREE.Line(g, new THREE.LineBasicMaterial({ color, depthTest: false, linewidth: 2 }));

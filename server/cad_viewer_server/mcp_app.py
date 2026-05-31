@@ -343,6 +343,220 @@ def build_mcp(registry: Registry) -> FastMCP:
 
         return await anyio.to_thread.run_sync(_impl)
 
+    # ---- geometry self-check --------------------------------------------
+    @mcp.tool()
+    async def check_part(
+        min_wall_mm: float = 1.2, part: str | None = None, ctx: Context = None  # type: ignore[assignment]
+    ) -> str:
+        """Validate geometry: bbox, volume, manifold/valid, solid count, and a
+        thin-feature heuristic — so the agent confirms a design without guessing.
+
+        `min_wall_mm` flags any solid whose smallest bbox dimension is below it
+        (likely too thin to print on FDM). Returns JSON.
+        """
+        ps, err = _need(part, ctx)
+        if err:
+            return err
+
+        def _impl() -> str:
+            with registry.build_lock:
+                try:
+                    res = load_part(
+                        Path(ps.part_path),
+                        Path(ps.project_root) if ps.project_root else None,
+                        overrides=ps.param_values,
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    return json.dumps({"ok": False, "build_error": str(exc)})
+                obj = res.obj
+                report: dict = {"ok": True, "part_id": ps.part_id}
+                try:
+                    v = obj.is_valid
+                    report["is_valid"] = bool(v() if callable(v) else v)
+                except Exception:  # noqa: BLE001
+                    report["is_valid"] = None
+                try:
+                    report["is_manifold"] = bool(obj.is_manifold)
+                except Exception:  # noqa: BLE001
+                    report["is_manifold"] = None
+                try:
+                    solids = obj.solids()
+                except Exception:  # noqa: BLE001
+                    solids = []
+                report["solid_count"] = len(solids)
+                if len(solids) > 1:
+                    report["note_solids"] = (
+                        f"{len(solids)} solides séparés — assemblage non fusionné "
+                        "(normal pour un Compound multi-pièces ; sinon vérifie tes booléens)."
+                    )
+                report["bbox_mm"] = res.bbox
+                report["volume_mm3"] = res.volume
+                thin = []
+                for i, s in enumerate(solids):
+                    try:
+                        bb = s.bounding_box()
+                        dmin = min(bb.size.X, bb.size.Y, bb.size.Z)
+                        if dmin < min_wall_mm:
+                            thin.append({"solid": i, "min_dim_mm": round(dmin, 3)})
+                    except Exception:  # noqa: BLE001
+                        pass
+                report["thin_features"] = thin
+                report["thin_warning"] = (
+                    f"{len(thin)} solide(s) sous {min_wall_mm}mm" if thin else None
+                )
+                report["watertight"] = report.get("is_valid") and report.get("is_manifold")
+                return json.dumps(report, indent=2, ensure_ascii=False)
+
+        return await anyio.to_thread.run_sync(_impl)
+
+    # ---- assembly tree ---------------------------------------------------
+    @mcp.tool()
+    async def list_nodes(part: str | None = None, ctx: Context = None) -> str:  # type: ignore[assignment]
+        """Tree of named nodes (label, bbox mm, volume) of your part's assembly.
+
+        Lets the agent target a node precisely ('the keel', 'port_duct') instead
+        of guessing — the same labels the tablet annotation reports as
+        picked_node. Returns JSON.
+        """
+        ps, err = _need(part, ctx)
+        if err:
+            return err
+
+        def _node(n, depth: int) -> dict:
+            d: dict = {"label": getattr(n, "label", "") or "(sans label)"}
+            try:
+                bb = n.bounding_box()
+                d["bbox_mm"] = [round(bb.size.X, 1), round(bb.size.Y, 1), round(bb.size.Z, 1)]
+                d["center_mm"] = [round(bb.center().X, 1), round(bb.center().Y, 1), round(bb.center().Z, 1)]
+            except Exception:  # noqa: BLE001
+                pass
+            try:
+                if hasattr(n, "volume"):
+                    d["volume_mm3"] = round(float(n.volume), 1)
+            except Exception:  # noqa: BLE001
+                pass
+            kids = getattr(n, "children", None)
+            if kids and depth < 6:
+                d["children"] = [_node(c, depth + 1) for c in kids]
+            return d
+
+        def _impl() -> str:
+            with registry.build_lock:
+                try:
+                    res = load_part(
+                        Path(ps.part_path),
+                        Path(ps.project_root) if ps.project_root else None,
+                        overrides=ps.param_values,
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    return json.dumps({"ok": False, "build_error": str(exc)})
+                return json.dumps(
+                    {"part_id": ps.part_id, "tree": _node(res.obj, 0)},
+                    indent=2, ensure_ascii=False,
+                )
+
+        return await anyio.to_thread.run_sync(_impl)
+
+    # ---- measure + cross-section ----------------------------------------
+    def _find_node(root, label: str):
+        match = None
+        def walk(n):
+            nonlocal match
+            if match is not None:
+                return
+            if (getattr(n, "label", "") or "") == label:
+                match = n; return
+            for c in (getattr(n, "children", None) or []):
+                walk(c)
+        walk(root)
+        return match
+
+    @mcp.tool()
+    async def measure_distance(
+        node_a: str, node_b: str, part: str | None = None, ctx: Context = None  # type: ignore[assignment]
+    ) -> str:
+        """Distance (mm) between the centres of two named nodes + per-axis
+        deltas. Node labels come from list_nodes / picked_node."""
+        ps, err = _need(part, ctx)
+        if err:
+            return err
+
+        def _impl() -> str:
+            with registry.build_lock:
+                try:
+                    res = load_part(
+                        Path(ps.part_path),
+                        Path(ps.project_root) if ps.project_root else None,
+                        overrides=ps.param_values,
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    return json.dumps({"ok": False, "build_error": str(exc)})
+                na, nb = _find_node(res.obj, node_a), _find_node(res.obj, node_b)
+                missing = [n for n, x in ((node_a, na), (node_b, nb)) if x is None]
+                if missing:
+                    return json.dumps({"ok": False, "error": f"node(s) introuvable(s): {missing}"})
+                ca, cb = na.bounding_box().center(), nb.bounding_box().center()
+                dx, dy, dz = cb.X - ca.X, cb.Y - ca.Y, cb.Z - ca.Z
+                dist = (dx * dx + dy * dy + dz * dz) ** 0.5
+                return json.dumps({
+                    "ok": True, "node_a": node_a, "node_b": node_b,
+                    "distance_mm": round(dist, 3),
+                    "delta_mm": {"x": round(dx, 3), "y": round(dy, 3), "z": round(dz, 3)},
+                }, indent=2, ensure_ascii=False)
+
+        return await anyio.to_thread.run_sync(_impl)
+
+    @mcp.tool()
+    async def cross_section(
+        axis: str = "x", offset_mm: float | None = None,
+        part: str | None = None, ctx: Context = None  # type: ignore[assignment]
+    ) -> list:
+        """Cut the model with a plane and render the remaining half — reveals
+        internal cavities / wall thicknesses the outer iso hides.
+
+        axis: 'x'|'y'|'z' (plane normal). offset_mm: cut position along that
+        axis (default = bbox centre). Returns a multi-view PNG of the cut solid.
+        """
+        ps, err = _need(part, ctx)
+        if err:
+            return [_text(err)]
+        ax = axis.lower().strip()
+        if ax not in ("x", "y", "z"):
+            return [_text("axis doit être 'x', 'y' ou 'z'.")]
+
+        def _impl() -> list:
+            from build123d import Box, Pos
+            with registry.build_lock:
+                try:
+                    res = load_part(
+                        Path(ps.part_path),
+                        Path(ps.project_root) if ps.project_root else None,
+                        overrides=ps.param_values,
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    return [_text(f"Build échoué:\n\n{exc}")]
+                obj = res.obj
+                bb = obj.bounding_box()
+                ctr = bb.center()
+                big = max(bb.size.X, bb.size.Y, bb.size.Z) * 4 + 100
+                off = offset_mm if offset_mm is not None else {
+                    "x": ctr.X, "y": ctr.Y, "z": ctr.Z}[ax]
+                # half-space box positioned to keep the "low" side of the cut
+                half = Box(big, big, big)
+                shift = {"x": (off - big / 2, ctr.Y, ctr.Z),
+                         "y": (ctr.X, off - big / 2, ctr.Z),
+                         "z": (ctr.X, ctr.Y, off - big / 2)}[ax]
+                try:
+                    cut = obj & (Pos(*shift) * half)
+                    if cut is None or getattr(cut, "volume", 0) == 0:
+                        return [_text("Coupe vide à cet offset — ajuste offset_mm.")]
+                    png = render_views_png(cut, views=("iso", "front", "side", "top"))
+                except Exception as exc:  # noqa: BLE001
+                    return [_text(f"Coupe échouée: {type(exc).__name__}: {exc}")]
+            return [_text(f"Coupe {ax}={off:.1f}mm (moitié basse conservée) :"), _image(png)]
+
+        return await anyio.to_thread.run_sync(_impl)
+
     # ---- parameters ------------------------------------------------------
     @mcp.tool()
     def get_part_params(part: str | None = None, ctx: Context = None) -> str:  # type: ignore[assignment]

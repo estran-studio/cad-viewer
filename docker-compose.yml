@@ -27,8 +27,9 @@ services:
       - /Users/wq/Project/bascanada/my_fleet/cad:/Users/wq/Project/bascanada/my_fleet/cad:ro
       # Pièces de démo livrées avec cad-viewer (même chemin host=container).
       - /Users/wq/Project/bascanada/cad-viewer/examples:/Users/wq/Project/bascanada/cad-viewer/examples:ro
-      # Le fichier de config monté en lecture seule.
-      - ./cad-viewer.toml:/app/cad-viewer.toml:ro
+      # Le fichier de config VIT DANS my_fleet (versionné avec les pièces qu'il
+      # déclare) → monté en lecture seule depuis là. Le CMD pointe /app/cad-viewer.toml.
+      - /Users/wq/Project/bascanada/my_fleet/cad/cad-viewer.toml:/app/cad-viewer.toml:ro
       # Données persistantes (bibliothèque d'images de référence) — survit aux
       # rebuilds d'image. Visible/éditable sur l'hôte sous ./.cad-data.
       - ./.cad-data:/data

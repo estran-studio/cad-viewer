@@ -443,7 +443,10 @@ export class SceneManager {
 
     if (meshes.length === 0) return { triangleCount: 0, dimensions: null };
     const info = this.calculateModelInfo(meshes);
-    this.refreshDimensions();  // keep the dim box in sync with the new model
+    // NB: do NOT build the dim box here — loadFromUrl recenters the model
+    // (frameToObject does mesh.position.sub(center)) AFTER this returns, which
+    // would leave the box offset. The host calls refreshDimensions() once the
+    // model is positioned.
     return info;
   }
 

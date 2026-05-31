@@ -106,10 +106,11 @@
       cameraController.frameToObject(sceneManager.currentMesh, false);
       // Update wireframe state from mesh
       isWireframeMode = ModelOperations.getWireframeState(sceneManager.currentMesh);
-      
+
       // Ensure the camera target is at origin after framing
       sceneManager.controls.target.set(0, 0, 0);
       sceneManager.controls.update();
+      sceneManager.refreshDimensions();  // after recenter → box stays aligned
     }
     
     // Save state after loading model
@@ -191,6 +192,8 @@
     const savedGrid = savedState.grid ?? true;
     sceneManager.setGridVisible(savedGrid);
     gridVisible = savedGrid;
+
+    sceneManager.refreshDimensions();  // model fully positioned → box aligned
   }
 
   function saveCurrentState(force: boolean = false) {
@@ -320,12 +323,14 @@
       modelInfo = await sceneManager.loadModelFromBuffer(buf, fmt, color);
       const obj = sceneManager.currentObject ?? sceneManager.currentMesh;
       if (obj) {
-        cameraController.frameToObject(obj, false);
+        cameraController.frameToObject(obj, false);  // recenters the model to origin
         sceneManager.controls.target.set(0, 0, 0);
         sceneManager.controls.update();
         isWireframeMode = ModelOperations.getWireframeState(sceneManager.currentMesh);
         // Restore camera / wireframe / grid for THIS part's persistenceId.
         applyPersistedView();
+        // Build the dimension box NOW — the model has its final position.
+        sceneManager.refreshDimensions();
       }
       currentModelUrl = url;
       _settleLoad(url, true);

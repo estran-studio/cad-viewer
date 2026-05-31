@@ -85,6 +85,9 @@
   let parts: PartInfo[] = [];
   let currentPartId: string | null = null;
   let building = false;
+  let buildElapsed = 0;          // seconds since the current build started
+  let buildStartedAt = 0;
+  let buildTick: any = null;
   let collapsed: Record<string, boolean> = {}; // per-project accordion state
   // ---- VSCode-like shell ----
   let sidebarOpen = true;
@@ -160,6 +163,7 @@
     ws?.close();
     clearTimeout(wsRetry);
     clearInterval(partsPoll);
+    clearInterval(buildTick);
   });
 
   function untilViewerReady(): Promise<void> {
@@ -298,11 +302,14 @@
     ws.onmessage = (ev) => {
       try {
         const msg = JSON.parse(ev.data);
-        if (msg.type === 'reload') {
+        if (msg.type === 'build_start') {
+          // A real build was enqueued for this part (param/view change, file
+          // edit, …). Cached combos publish `reload` directly with no
+          // build_start, so this fires only when there's genuine work.
+          startBuilding();
+        } else if (msg.type === 'reload') {
           version = msg.version ?? version;
-          // Watcher reload on the SAME part → silent refresh (no clear, no
-          // spinner). loadModel() manages `building` if it had been set by
-          // a switch in flight.
+          stopBuilding();            // build done → model about to swap in
           loadModel({ version });
           refreshParts();
           if (activeView === 'params') refreshParams();
@@ -311,7 +318,7 @@
             if (prev != null) loadGhost(prev);
           });
         } else if (msg.type === 'build_error') {
-          building = false;
+          stopBuilding();
           showToast('⚠ build123d a échoué — voir le terminal');
           refreshParts();
         }
@@ -327,12 +334,27 @@
     wsRetry = setTimeout(connectWs, 1500);
   }
 
+  // Explicit "build in progress" state with a live elapsed counter, so a slow
+  // build (heavy view under Docker) clearly reads as "working", not frozen.
+  function startBuilding() {
+    building = true;
+    buildStartedAt = Date.now();
+    buildElapsed = 0;
+    clearInterval(buildTick);
+    buildTick = setInterval(() => { buildElapsed = (Date.now() - buildStartedAt) / 1000; }, 200);
+  }
+  function stopBuilding() {
+    building = false;
+    clearInterval(buildTick);
+    buildTick = null;
+  }
+
   async function loadModel(opts?: { isSwitch?: boolean; version?: number }) {
     if (!viewerEl?.loadModelUrl || !currentPartId) return;
     const tag = opts?.version ?? Date.now();
     const isSwitch = !!opts?.isSwitch;
     if (isSwitch) {
-      building = true;       // show the loading overlay
+      startBuilding();         // show the loading overlay
       viewerEl.clearScene?.(); // hide previous model immediately
     }
     try {
@@ -344,7 +366,7 @@
         showToast('Échec chargement : ' + (err as Error).message);
       }
     } finally {
-      building = false;
+      stopBuilding();
     }
   }
 
@@ -942,7 +964,16 @@
     ></canvas>
 
     {#if building}
-      <div class="spinner">⏳ Build de {currentPartId ? shortName(currentPartId) : ''}…</div>
+      <div class="spinner">
+        <div class="spin-ring"></div>
+        <div class="spin-info">
+          <div class="spin-title">Construction… {buildElapsed.toFixed(1)}s</div>
+          <div class="spin-sub">
+            {currentPartId ? shortName(currentPartId) : ''}{paramValues.view ? ' · ' + paramValues.view : ''}
+          </div>
+          {#if buildElapsed > 3}<div class="spin-hint">les vues lourdes prennent quelques secondes (Docker/Rosetta)…</div>{/if}
+        </div>
+      </div>
     {/if}
 
     <div class="toolbar" class:drawing={mode === 'draw'}>
@@ -1197,9 +1228,20 @@
 
   .spinner {
     position: absolute; top: 50%; left: 50%; transform: translate(-50%,-50%);
-    z-index: 22; background: rgba(28,28,30,0.92); color: #fff;
-    padding: 12px 20px; border-radius: 10px; font-size: 15px; border: 1px solid #3a3a3c;
+    z-index: 22; background: rgba(20,20,22,0.95); color: #fff;
+    padding: 16px 22px; border-radius: 14px; border: 1px solid #3a3a3c;
+    display: flex; align-items: center; gap: 14px;
+    box-shadow: 0 8px 30px rgba(0,0,0,0.5);
   }
+  .spin-ring {
+    width: 30px; height: 30px; flex: 0 0 auto; border-radius: 50%;
+    border: 3px solid rgba(255,255,255,0.18); border-top-color: #0a84ff;
+    animation: spin 0.8s linear infinite;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  .spin-title { font-size: 15px; font-weight: 600; font-variant-numeric: tabular-nums; }
+  .spin-sub { font-size: 13px; color: #9a9a9e; margin-top: 2px; }
+  .spin-hint { font-size: 11px; color: #6f6f73; margin-top: 4px; max-width: 240px; }
 
   /* bottom toolbar of the viewer pane (nav actions ↔ draw palette) */
   .toolbar {

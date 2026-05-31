@@ -24,7 +24,7 @@ from mcp.server.fastmcp import Context, FastMCP
 from mcp.types import ImageContent, TextContent
 
 from .loader import load_part, part_info_text
-from .render import render_iso_png
+from .render import render_iso_png, render_views_png
 from .state import PartState, Registry
 from .watcher import build_part, open_part
 
@@ -295,9 +295,14 @@ def build_mcp(registry: Registry) -> FastMCP:
     # ---- build / render --------------------------------------------------
     @mcp.tool()
     async def get_current_render(
-        part: str | None = None, ctx: Context = None  # type: ignore[assignment]
+        multiview: bool = True, part: str | None = None, ctx: Context = None  # type: ignore[assignment]
     ) -> list:
-        """Headless iso PNG of your part as it is now (no annotation)."""
+        """Headless PNG of your part as it is now (no annotation).
+
+        multiview=True (default): one image with iso/front/side/top angles +
+        XYZ axes and per-axis size labels (mm) — best to grasp shape AND scale.
+        multiview=False: a single clean iso view.
+        """
         ps, err = _need(part, ctx)
         if err:
             return [_text(err)]
@@ -314,7 +319,8 @@ def build_mcp(registry: Registry) -> FastMCP:
                 except Exception as exc:  # noqa: BLE001
                     return [_text(f"Build échoué:\n\n{exc}")]
                 try:
-                    png = render_iso_png(res.obj)
+                    png = (render_views_png(res.obj) if multiview
+                           else render_iso_png(res.obj))
                 except Exception as exc:  # noqa: BLE001
                     return [_text(f"Rendu échoué: {type(exc).__name__}: {exc}")]
             txt = json.dumps(ps.status(), indent=2, ensure_ascii=False)

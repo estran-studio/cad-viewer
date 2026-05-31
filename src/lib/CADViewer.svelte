@@ -25,6 +25,12 @@
   // Ensure gizmoScale is always a number (custom elements pass attributes as strings)
   $: gizmoScaleNumber = typeof gizmoScale === 'string' ? parseFloat(gizmoScale) || 1.0 : gizmoScale;
 
+  // Hide the built-in Toolbar / InfoPanel when the host provides its own chrome
+  // (e.g. <cad-studio>'s unified top bar). Default true → embeddable consumers
+  // (vancad, vscode-openscad) keep the original overlays.
+  export let showToolbar = true;
+  export let showInfoPanel = true;
+
   // --- Themeable properties ---
   export let toolbarBackgroundColor = 'rgba(42, 42, 42, 0.8)';
   export let toolbarButtonBackgroundColor = '#444';
@@ -368,6 +374,16 @@
     return sceneManager?.isDimensionsVisible() ?? false;
   }
 
+  // View controls re-exposed so a host (cad-studio) can drive them from its
+  // own top bar instead of the built-in Toolbar.
+  export function toggleViewMode() { handleToggleViewMode(); return viewMode; }
+  export function toggleWireframe() { handleToggleWireframe(); return isWireframeMode; }
+  export function toggleGrid() { handleToggleGrid(); return gridVisible; }
+  export function exportPNG() { handleExportPNG(); }
+  export function getViewState() {
+    return { viewMode, wireframe: isWireframeMode, grid: gridVisible };
+  }
+
   export function captureViewPNG(): string {
     return sceneManager ? sceneManager.captureCanvasDataURL() : '';
   }
@@ -445,24 +461,28 @@
 >
   <div class="viewer-container" bind:this={container}></div>
 
-  <Toolbar
-    {viewMode}
-    onToggleViewMode={handleToggleViewMode}
-    onToggleWireframe={handleToggleWireframe}
-    onToggleGrid={handleToggleGrid}
-    {gridVisible}
-    onExportPNG={handleExportPNG}
-    {toolbarBackgroundColor}
-    {toolbarButtonBackgroundColor}
-    {toolbarButtonHoverBackgroundColor}
-    {toolbarButtonForegroundColor}
-    {toolbarButtonBorderColor}
-  />
+  {#if showToolbar}
+    <Toolbar
+      {viewMode}
+      onToggleViewMode={handleToggleViewMode}
+      onToggleWireframe={handleToggleWireframe}
+      onToggleGrid={handleToggleGrid}
+      {gridVisible}
+      onExportPNG={handleExportPNG}
+      {toolbarBackgroundColor}
+      {toolbarButtonBackgroundColor}
+      {toolbarButtonHoverBackgroundColor}
+      {toolbarButtonForegroundColor}
+      {toolbarButtonBorderColor}
+    />
+  {/if}
 
-  <InfoPanel
-    {modelInfo}
-    {infoPanelBackgroundColor}
-    {infoPanelForegroundColor}
-    {infoPanelSpanBackgroundColor}
-  />
+  {#if showInfoPanel}
+    <InfoPanel
+      {modelInfo}
+      {infoPanelBackgroundColor}
+      {infoPanelForegroundColor}
+      {infoPanelSpanBackgroundColor}
+    />
+  {/if}
 </div>

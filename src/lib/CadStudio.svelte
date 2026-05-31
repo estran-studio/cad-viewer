@@ -365,6 +365,7 @@
       await viewerEl.loadModelUrl(
         `${apiBase}/api/model?part=${encodeURIComponent(currentPartId)}&v=${tag}`
       );
+      syncViewState();  // reflect the part's restored view/wireframe/grid in the top bar
     } catch (err) {
       if ((err as Error).message !== 'superseded') {
         showToast('Échec chargement : ' + (err as Error).message);
@@ -399,6 +400,19 @@
     viewerEl?.setDimensionsVisible?.(dimsOn);
     saveStudioState();
   }
+
+  // ---- viewer controls mirrored into the top bar (built-in Toolbar hidden) ----
+  let viewMode: 'perspective' | 'orthographic' = 'perspective';
+  let wireframeOn = false;
+  let gridOn = true;
+  function syncViewState() {
+    const s = viewerEl?.getViewState?.();
+    if (s) { viewMode = s.viewMode; wireframeOn = s.wireframe; gridOn = s.grid; }
+  }
+  function tbViewMode() { viewMode = viewerEl?.toggleViewMode?.() ?? viewMode; }
+  function tbWireframe() { wireframeOn = viewerEl?.toggleWireframe?.() ?? wireframeOn; }
+  function tbGrid() { gridOn = viewerEl?.toggleGrid?.() ?? gridOn; }
+  function tbExport() { viewerEl?.exportPNG?.(); }
 
   async function toggleDiff() {
     diffOn = !diffOn;
@@ -782,6 +796,13 @@
   <!-- title bar: app name + editor tabs + connection -->
   <header class="titlebar">
     <div class="brand">cad-studio</div>
+    <div class="viewctl">
+      <button on:click={tbViewMode} title="Perspective / Orthographique">{viewMode === 'perspective' ? '⬠ Persp' : '⬚ Ortho'}</button>
+      <button class:on={wireframeOn} on:click={tbWireframe} title="Fil de fer">◫ Fil</button>
+      <button class:on={gridOn} on:click={tbGrid} title="Grille">▦ Grille</button>
+      <button class:on={dimsOn} on:click={toggleDims} title="Boîte de cotes (mm)">📐 Cotes</button>
+      <button on:click={tbExport} title="Export PNG">⤓ PNG</button>
+    </div>
     <div class="tabs">
       {#each openTabs as t (t.part_id)}
         <div
@@ -933,6 +954,8 @@
         bind:this={viewerEl}
         viewerBackgroundColor={viewerBackgroundColor}
         persistenceId="cad-studio"
+        showToolbar={false}
+        showInfoPanel={false}
       ></cad-viewer>
     </div>
 
@@ -993,7 +1016,6 @@
           🖼 Référence
           <input type="file" accept="image/*" on:change={onPickFile} />
         </label>
-        <button class:primary={dimsOn} on:click={toggleDims} title="Boîte de cotes (mm)">📐 Cotes</button>
         {#if histVersions.length || diffOn}
           <button class:primary={diffOn} on:click={toggleDiff} title="Comparer avec une version précédente">
             👻 Diff{#if diffOn && ghostVersion != null} v{ghostVersion}{/if}
@@ -1062,7 +1084,16 @@
     min-width: 0;
   }
   .brand { display: flex; align-items: center; font-weight: 600; color: #cfcfd2;
-    font-size: 13px; padding-right: 6px; flex: 0 0 auto; }
+    font-size: 13px; padding-right: 4px; flex: 0 0 auto; }
+  .viewctl { display: flex; align-items: center; gap: 4px; flex: 0 0 auto;
+    padding-right: 8px; margin-right: 4px; border-right: 1px solid #34343a; }
+  .viewctl button {
+    height: 30px; align-self: center; background: #2a2a2c; color: #c9c9cd;
+    border: 1px solid #3a3a3c; border-radius: 7px; padding: 0 9px; font-size: 12px;
+    cursor: pointer; white-space: nowrap; font-family: inherit;
+  }
+  .viewctl button:hover { background: #343438; }
+  .viewctl button.on { background: #0a4a8a; color: #fff; border-color: #0a84ff; }
   .titlebar .tabs {
     display: flex; align-items: flex-end; gap: 4px; flex: 1 1 auto; min-width: 0;
     overflow-x: auto; scrollbar-width: none;

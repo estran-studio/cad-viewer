@@ -501,52 +501,69 @@ export class SceneManager {
     const group = new THREE.Group();
     group.renderOrder = 2;
 
-    // wireframe box
+    // Faint full wireframe box for context.
     const edges = new THREE.LineSegments(
       new THREE.EdgesGeometry(new THREE.BoxGeometry(size.x, size.y, size.z)),
-      new THREE.LineBasicMaterial({ color: 0x0a84ff, transparent: true, opacity: 0.85, depthTest: false })
+      new THREE.LineBasicMaterial({ color: 0x888888, transparent: true, opacity: 0.35, depthTest: false })
     );
     edges.position.copy(box.getCenter(new THREE.Vector3()));
     edges.renderOrder = 2;
     group.add(edges);
 
-    // one label per axis, centred on the relevant edge, near the box min corner
+    // Axis-coloured dimension edges from the min corner (CAD convention:
+    // X = red, Y = green, Z = blue) + a coloured size label on each.
     const m = box.min, mx = box.max;
+    const X = 0xe5484d, Y = 0x30a46c, Z = 0x0a84ff;
     const fmt = (v: number) => (v >= 100 ? v.toFixed(0) : v.toFixed(1)) + ' mm';
-    const pad = Math.max(size.x, size.y, size.z) * 0.06 + 1;
-    this.addDimLabel(group, fmt(size.x), new THREE.Vector3((m.x + mx.x) / 2, m.y - pad, m.z));
-    this.addDimLabel(group, fmt(size.y), new THREE.Vector3(m.x - pad, (m.y + mx.y) / 2, m.z));
-    this.addDimLabel(group, fmt(size.z), new THREE.Vector3(m.x - pad, m.y, (m.z + mx.z) / 2));
+    const seg = (a: THREE.Vector3, b: THREE.Vector3, color: number) => {
+      const g = new THREE.BufferGeometry().setFromPoints([a, b]);
+      const line = new THREE.Line(g, new THREE.LineBasicMaterial({ color, depthTest: false, linewidth: 2 }));
+      line.renderOrder = 3;
+      group.add(line);
+    };
+    seg(new THREE.Vector3(m.x, m.y, m.z), new THREE.Vector3(mx.x, m.y, m.z), X);
+    seg(new THREE.Vector3(m.x, m.y, m.z), new THREE.Vector3(m.x, mx.y, m.z), Y);
+    seg(new THREE.Vector3(m.x, m.y, m.z), new THREE.Vector3(m.x, m.y, mx.z), Z);
+
+    const pad = Math.max(size.x, size.y, size.z) * 0.04 + 2;
+    this.addDimLabel(group, 'X ' + fmt(size.x), new THREE.Vector3((m.x + mx.x) / 2, m.y - pad, m.z - pad), X);
+    this.addDimLabel(group, 'Y ' + fmt(size.y), new THREE.Vector3(m.x - pad, (m.y + mx.y) / 2, m.z - pad), Y);
+    this.addDimLabel(group, 'Z ' + fmt(size.z), new THREE.Vector3(m.x - pad, m.y - pad, (m.z + mx.z) / 2), Z);
 
     this.scene.add(group);
     this.dimGroup = group;
   }
 
-  private addDimLabel(group: THREE.Group, text: string, pos: THREE.Vector3): void {
-    const pad = 8, font = 48;
+  private addDimLabel(group: THREE.Group, text: string, pos: THREE.Vector3, color: number): void {
+    const pad = 10, font = 44, dpr = 2;
     const c = document.createElement('canvas');
-    const ctx = c.getContext('2d')!;
-    ctx.font = `bold ${font}px -apple-system, Arial, sans-serif`;
-    const w = ctx.measureText(text).width;
-    c.width = Math.ceil(w + pad * 2);
-    c.height = font + pad * 2;
-    ctx.font = `bold ${font}px -apple-system, Arial, sans-serif`;
-    ctx.fillStyle = 'rgba(10,12,16,0.82)';
-    ctx.fillRect(0, 0, c.width, c.height);
-    ctx.fillStyle = '#4db4ff';
+    let ctx = c.getContext('2d')!;
+    ctx.font = `bold ${font}px Arial, sans-serif`;
+    const w = Math.ceil(ctx.measureText(text).width);
+    c.width = (w + pad * 2) * dpr;
+    c.height = (font + pad * 2) * dpr;
+    ctx = c.getContext('2d')!;
+    ctx.scale(dpr, dpr);
+    ctx.font = `bold ${font}px Arial, sans-serif`;
+    // pill background + coloured text for high contrast at any zoom
+    ctx.fillStyle = 'rgba(12,14,18,0.85)';
+    ctx.fillRect(0, 0, c.width / dpr, c.height / dpr);
+    ctx.fillStyle = '#' + color.toString(16).padStart(6, '0');
     ctx.textBaseline = 'middle';
-    ctx.fillText(text, pad, c.height / 2);
+    ctx.fillText(text, pad, (font + pad * 2) / 2);
 
     const tex = new THREE.CanvasTexture(c);
     tex.minFilter = THREE.LinearFilter;
-    const sprite = new THREE.Sprite(new THREE.SpriteMaterial({ map: tex, depthTest: false, transparent: true }));
-    // world size scaled to the model so labels stay readable but proportional
-    const target = this.currentObject ?? this.currentMesh!;
-    const diag = new THREE.Box3().setFromObject(target).getSize(new THREE.Vector3()).length();
-    const h = diag * 0.05;
-    sprite.scale.set(h * (c.width / c.height), h, 1);
+    tex.needsUpdate = true;
+    const sprite = new THREE.Sprite(new THREE.SpriteMaterial({
+      map: tex, depthTest: false, depthWrite: false, transparent: true,
+      sizeAttenuation: false,  // constant on-screen size → always readable
+    }));
+    const aspect = (w + pad * 2) / (font + pad * 2);
+    const hScreen = 0.055;       // ~5.5% of viewport height
+    sprite.scale.set(hScreen * aspect, hScreen, 1);
     sprite.position.copy(pos);
-    sprite.renderOrder = 3;
+    sprite.renderOrder = 4;
     group.add(sprite);
   }
 

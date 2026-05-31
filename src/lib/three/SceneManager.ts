@@ -535,7 +535,9 @@ export class SceneManager {
     seg(new THREE.Vector3(m.x, m.y, m.z), new THREE.Vector3(m.x, mx.y, m.z), Y);
     seg(new THREE.Vector3(m.x, m.y, m.z), new THREE.Vector3(m.x, m.y, mx.z), Z);
 
-    const pad = Math.max(size.x, size.y, size.z) * 0.04 + 2;
+    // pad must be a small fraction of model size — a fixed unit constant would
+    // be metres for GLB and fling labels far away. Keep it tiny + relative.
+    const pad = Math.max(size.x, size.y, size.z) * 0.04;
     this.addDimLabel(group, 'X ' + fmt(size.x), new THREE.Vector3((m.x + mx.x) / 2, m.y - pad, m.z - pad), X);
     this.addDimLabel(group, 'Y ' + fmt(size.y), new THREE.Vector3(m.x - pad, (m.y + mx.y) / 2, m.z - pad), Y);
     this.addDimLabel(group, 'Z ' + fmt(size.z), new THREE.Vector3(m.x - pad, m.y - pad, (m.z + mx.z) / 2), Z);

@@ -503,6 +503,7 @@ export class SceneManager {
     const target = this.currentObject ?? this.currentMesh;
     if (!this.dimVisible || !target) return;
 
+    target.updateWorldMatrix(true, true);  // box must reflect current transform
     const box = new THREE.Box3().setFromObject(target);
     if (box.isEmpty()) return;
     const size = box.getSize(new THREE.Vector3());

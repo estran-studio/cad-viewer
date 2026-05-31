@@ -24,6 +24,8 @@ export class SceneManager {
   // STL/3MF it's just the single mesh. Annotation picking walks this.
   public currentObject: THREE.Object3D | null = null;
   private ghostObject: THREE.Object3D | null = null; // previous-version overlay (diff)
+  private dimGroup: THREE.Group | null = null;       // bounding box + size labels
+  private dimVisible = false;
   public gridHelper!: THREE.GridHelper;
   private gridSize = 100;
   private gridDivisions = 100;
@@ -331,7 +333,7 @@ export class SceneManager {
     };
   }
 
-  public clear() { this.clearCurrentModel(); this.clearGhost(); }
+  public clear() { this.clearCurrentModel(); this.clearGhost(); this.clearDimensions(); }
 
   private clearCurrentModel() {
     if (this.currentMesh) {
@@ -428,7 +430,9 @@ export class SceneManager {
     }
 
     if (meshes.length === 0) return { triangleCount: 0, dimensions: null };
-    return this.calculateModelInfo(meshes);
+    const info = this.calculateModelInfo(meshes);
+    this.refreshDimensions();  // keep the dim box in sync with the new model
+    return info;
   }
 
   /**
@@ -473,6 +477,90 @@ export class SceneManager {
       }
     });
     this.ghostObject = null;
+  }
+
+  /**
+   * Dimension box: a wireframe bounding box around the model with X/Y/Z size
+   * labels in mm — makes the scale of a model legible at a glance. Additive
+   * (the embeddable <cad-viewer> gets it too); rebuilt on toggle/reload.
+   */
+  public setDimensionsVisible(visible: boolean): void {
+    this.dimVisible = visible;
+    this.refreshDimensions();
+  }
+  public isDimensionsVisible(): boolean { return this.dimVisible; }
+
+  public refreshDimensions(): void {
+    this.clearDimensions();
+    const target = this.currentObject ?? this.currentMesh;
+    if (!this.dimVisible || !target) return;
+
+    const box = new THREE.Box3().setFromObject(target);
+    if (box.isEmpty()) return;
+    const size = box.getSize(new THREE.Vector3());
+    const group = new THREE.Group();
+    group.renderOrder = 2;
+
+    // wireframe box
+    const edges = new THREE.LineSegments(
+      new THREE.EdgesGeometry(new THREE.BoxGeometry(size.x, size.y, size.z)),
+      new THREE.LineBasicMaterial({ color: 0x0a84ff, transparent: true, opacity: 0.85, depthTest: false })
+    );
+    edges.position.copy(box.getCenter(new THREE.Vector3()));
+    edges.renderOrder = 2;
+    group.add(edges);
+
+    // one label per axis, centred on the relevant edge, near the box min corner
+    const m = box.min, mx = box.max;
+    const fmt = (v: number) => (v >= 100 ? v.toFixed(0) : v.toFixed(1)) + ' mm';
+    const pad = Math.max(size.x, size.y, size.z) * 0.06 + 1;
+    this.addDimLabel(group, fmt(size.x), new THREE.Vector3((m.x + mx.x) / 2, m.y - pad, m.z));
+    this.addDimLabel(group, fmt(size.y), new THREE.Vector3(m.x - pad, (m.y + mx.y) / 2, m.z));
+    this.addDimLabel(group, fmt(size.z), new THREE.Vector3(m.x - pad, m.y, (m.z + mx.z) / 2));
+
+    this.scene.add(group);
+    this.dimGroup = group;
+  }
+
+  private addDimLabel(group: THREE.Group, text: string, pos: THREE.Vector3): void {
+    const pad = 8, font = 48;
+    const c = document.createElement('canvas');
+    const ctx = c.getContext('2d')!;
+    ctx.font = `bold ${font}px -apple-system, Arial, sans-serif`;
+    const w = ctx.measureText(text).width;
+    c.width = Math.ceil(w + pad * 2);
+    c.height = font + pad * 2;
+    ctx.font = `bold ${font}px -apple-system, Arial, sans-serif`;
+    ctx.fillStyle = 'rgba(10,12,16,0.82)';
+    ctx.fillRect(0, 0, c.width, c.height);
+    ctx.fillStyle = '#4db4ff';
+    ctx.textBaseline = 'middle';
+    ctx.fillText(text, pad, c.height / 2);
+
+    const tex = new THREE.CanvasTexture(c);
+    tex.minFilter = THREE.LinearFilter;
+    const sprite = new THREE.Sprite(new THREE.SpriteMaterial({ map: tex, depthTest: false, transparent: true }));
+    // world size scaled to the model so labels stay readable but proportional
+    const target = this.currentObject ?? this.currentMesh!;
+    const diag = new THREE.Box3().setFromObject(target).getSize(new THREE.Vector3()).length();
+    const h = diag * 0.05;
+    sprite.scale.set(h * (c.width / c.height), h, 1);
+    sprite.position.copy(pos);
+    sprite.renderOrder = 3;
+    group.add(sprite);
+  }
+
+  private clearDimensions(): void {
+    if (!this.dimGroup) return;
+    this.scene.remove(this.dimGroup);
+    this.dimGroup.traverse((o) => {
+      const any = o as any;
+      any.geometry?.dispose?.();
+      const mat = any.material;
+      if (Array.isArray(mat)) mat.forEach((x) => { x.map?.dispose?.(); x.dispose?.(); });
+      else if (mat) { mat.map?.dispose?.(); mat.dispose?.(); }
+    });
+    this.dimGroup = null;
   }
 
   /** Re-render this frame and return it as a PNG data URL (for compositing). */

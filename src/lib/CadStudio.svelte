@@ -62,6 +62,8 @@
   let measuring = false;
   let measurePts: { x: number; y: number }[] = []; // overlay CSS px, ≤2
   let pendingMm = '';
+  // ---- dimension box (scale legibility) ----
+  let dimsOn = false;
   // ---- visual diff (ghost of a previous build) ----
   let diffOn = false;
   let histVersions: number[] = [];
@@ -100,6 +102,7 @@
     collapsed?: Record<string, boolean>;
     sidebarOpen?: boolean;
     activeView?: SideView;
+    dimsOn?: boolean;
   };
   function loadStudioState(): StudioState {
     try {
@@ -111,7 +114,7 @@
     try {
       localStorage.setItem(
         STUDIO_KEY,
-        JSON.stringify({ lastPartId: currentPartId, collapsed, sidebarOpen, activeView })
+        JSON.stringify({ lastPartId: currentPartId, collapsed, sidebarOpen, activeView, dimsOn })
       );
     } catch { /* quota / private mode */ }
   }
@@ -145,6 +148,7 @@
     const studio = loadStudioState();
     if (studio.collapsed) collapsed = { ...studio.collapsed };
     if (typeof studio.sidebarOpen === 'boolean') sidebarOpen = studio.sidebarOpen;
+    if (typeof studio.dimsOn === 'boolean') { dimsOn = studio.dimsOn; viewerEl?.setDimensionsVisible?.(dimsOn); }
     if (studio.activeView) activeView = studio.activeView;
     await refreshParts();
     if (parts.length && !currentPartId) {
@@ -388,6 +392,12 @@
     viewerEl?.loadGhostUrl?.(
       `${apiBase}/api/model?part=${encodeURIComponent(currentPartId)}&version=${v}`
     ).catch(() => { /* */ });
+  }
+
+  function toggleDims() {
+    dimsOn = !dimsOn;
+    viewerEl?.setDimensionsVisible?.(dimsOn);
+    saveStudioState();
   }
 
   async function toggleDiff() {
@@ -983,6 +993,7 @@
           🖼 Référence
           <input type="file" accept="image/*" on:change={onPickFile} />
         </label>
+        <button class:primary={dimsOn} on:click={toggleDims} title="Boîte de cotes (mm)">📐 Cotes</button>
         {#if histVersions.length || diffOn}
           <button class:primary={diffOn} on:click={toggleDiff} title="Comparer avec une version précédente">
             👻 Diff{#if diffOn && ghostVersion != null} v{ghostVersion}{/if}

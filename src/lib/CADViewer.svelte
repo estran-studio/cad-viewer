@@ -360,6 +360,14 @@
     sceneManager?.clearGhost();
   }
 
+  // Dimension box: wireframe bounds + X/Y/Z size labels (mm). Additive.
+  export function setDimensionsVisible(visible: boolean) {
+    sceneManager?.setDimensionsVisible(visible);
+  }
+  export function isDimensionsVisible(): boolean {
+    return sceneManager?.isDimensionsVisible() ?? false;
+  }
+
   export function captureViewPNG(): string {
     return sceneManager ? sceneManager.captureCanvasDataURL() : '';
   }

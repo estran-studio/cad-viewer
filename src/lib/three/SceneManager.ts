@@ -268,12 +268,16 @@ export class SceneManager {
 
   public loadModel(payload: string, payloadType: 'stl' | '3mf', color: string): ModelInfo {
     this.clearCurrentModel();
+    this.clearDimensions();         // drop any stale box before the new model
+    this.mmPerUnit = 1;             // string path is STL/3mf → already mm
 
     try {
       const meshes = this.parseModel(payload, payloadType, color);
       if (meshes.length > 0) {
         this.currentMesh = meshes[0];
-        return this.calculateModelInfo(meshes);
+        const info = this.calculateModelInfo(meshes);
+        this.refreshDimensions();   // keep the dim box in sync (this path missed it)
+        return info;
       }
     } catch (error) {
       console.error(`Failed to parse ${payloadType.toUpperCase()}:`, error);
@@ -503,7 +507,11 @@ export class SceneManager {
     const target = this.currentObject ?? this.currentMesh;
     if (!this.dimVisible || !target) return;
 
-    target.updateWorldMatrix(true, true);  // box must reflect current transform
+    // Box must reflect the CURRENT model: refresh world matrices across the
+    // whole subtree first (a stale matrix → box covering only part of the
+    // model, e.g. after a switch or a param rebuild).
+    this.scene.updateMatrixWorld(true);
+    target.updateWorldMatrix(true, true);
     const box = new THREE.Box3().setFromObject(target);
     if (box.isEmpty()) return;
     const size = box.getSize(new THREE.Vector3());
@@ -535,18 +543,22 @@ export class SceneManager {
     seg(new THREE.Vector3(m.x, m.y, m.z), new THREE.Vector3(m.x, mx.y, m.z), Y);
     seg(new THREE.Vector3(m.x, m.y, m.z), new THREE.Vector3(m.x, m.y, mx.z), Z);
 
-    // pad must be a small fraction of model size — a fixed unit constant would
-    // be metres for GLB and fling labels far away. Keep it tiny + relative.
-    const pad = Math.max(size.x, size.y, size.z) * 0.04;
-    this.addDimLabel(group, 'X ' + fmt(size.x), new THREE.Vector3((m.x + mx.x) / 2, m.y - pad, m.z - pad), X);
-    this.addDimLabel(group, 'Y ' + fmt(size.y), new THREE.Vector3(m.x - pad, (m.y + mx.y) / 2, m.z - pad), Y);
-    this.addDimLabel(group, 'Z ' + fmt(size.z), new THREE.Vector3(m.x - pad, m.y - pad, (m.z + mx.z) / 2), Z);
+    // Labels glued to the MIDDLE of each coloured axis edge, nudged just off
+    // the edge (a tiny fraction of model size) so the text doesn't sit on the
+    // line. World-attached (see addDimLabel) → they track the edge at any angle.
+    const maxS = Math.max(size.x, size.y, size.z);
+    const n = maxS * 0.015;  // tiny outward nudge so text clears the edge line
+    this.addDimLabel(group, 'X ' + fmt(size.x), new THREE.Vector3((m.x + mx.x) / 2, m.y - n, m.z - n), X, maxS);
+    this.addDimLabel(group, 'Y ' + fmt(size.y), new THREE.Vector3(m.x - n, (m.y + mx.y) / 2, m.z - n), Y, maxS);
+    this.addDimLabel(group, 'Z ' + fmt(size.z), new THREE.Vector3(m.x - n, m.y - n, (m.z + mx.z) / 2), Z, maxS);
 
     this.scene.add(group);
     this.dimGroup = group;
   }
 
-  private addDimLabel(group: THREE.Group, text: string, pos: THREE.Vector3, color: number): void {
+  private addDimLabel(
+    group: THREE.Group, text: string, pos: THREE.Vector3, color: number, modelSize: number
+  ): void {
     const pad = 10, font = 44, dpr = 2;
     const c = document.createElement('canvas');
     let ctx = c.getContext('2d')!;
@@ -569,11 +581,13 @@ export class SceneManager {
     tex.needsUpdate = true;
     const sprite = new THREE.Sprite(new THREE.SpriteMaterial({
       map: tex, depthTest: false, depthWrite: false, transparent: true,
-      sizeAttenuation: false,  // constant on-screen size → always readable
+      // world-attached so the label stays glued to its edge in 3D, visible
+      // from any angle. depthTest off → never hidden behind the mesh.
+      sizeAttenuation: true,
     }));
     const aspect = (w + pad * 2) / (font + pad * 2);
-    const hScreen = 0.055;       // ~5.5% of viewport height
-    sprite.scale.set(hScreen * aspect, hScreen, 1);
+    const h = modelSize * 0.04;   // small height; width follows text aspect
+    sprite.scale.set(h * aspect, h, 1);
     sprite.position.copy(pos);
     sprite.renderOrder = 4;
     group.add(sprite);

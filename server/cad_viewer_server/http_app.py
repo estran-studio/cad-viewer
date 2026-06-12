@@ -311,6 +311,77 @@ def create_app(registry: Registry) -> FastAPI:
             registry.hub.publish(ps.part_id, {"type": "refs", "part": ps.part_id})
         return JSONResponse({"status": "ok" if ok else "not_found", "id": id})
 
+    # ---- technical-sketch library (disk-persisted, per part) ------------
+    @app.get("/api/sketches")
+    async def api_sketches(part: str | None = None) -> JSONResponse:
+        ps = registry.resolve(part) if part else registry.single()
+        if ps is None:
+            return JSONResponse({"error": "unknown part", "part": part}, status_code=404)
+        items = registry.sketches.list(ps.part_id)
+        q = quote(ps.part_id, safe="")
+        for it in items:
+            it["url"] = f"/api/sketches/file?part={q}&id={it['id']}"
+        return JSONResponse({"part_id": ps.part_id, "items": items})
+
+    @app.get("/api/sketches/doc")
+    async def api_sketch_doc(part: str, id: int) -> JSONResponse:
+        ps = registry.resolve(part)
+        if ps is None:
+            return JSONResponse({"error": "unknown part", "part": part}, status_code=404)
+        doc = registry.sketches.get_doc(ps.part_id, id)
+        if doc is None:
+            return JSONResponse({"error": "not found"}, status_code=404)
+        return JSONResponse({"part_id": ps.part_id, "id": id, "doc": doc})
+
+    @app.get("/api/sketches/file")
+    async def api_sketch_file(part: str, id: int) -> Response:
+        ps = registry.resolve(part)
+        if ps is None:
+            return JSONResponse({"error": "unknown part", "part": part}, status_code=404)
+        png = registry.sketches.get_png(ps.part_id, id)
+        if png is None:
+            return JSONResponse({"error": "not found"}, status_code=404)
+        return Response(content=png, media_type="image/png",
+                        headers={"Cache-Control": "no-store"})
+
+    @app.post("/api/sketches")
+    async def api_sketch_save(
+        part: str = Form(...),
+        doc: str = Form(...),
+        id: int = Form(0),
+        label: str = Form(""),
+        note: str = Form(""),
+        image: UploadFile | None = None,
+    ) -> JSONResponse:
+        ps = registry.resolve(part)
+        if ps is None:
+            return JSONResponse({"error": "unknown part", "part": part}, status_code=404)
+        try:
+            doc_obj = json.loads(doc)
+        except ValueError:
+            return JSONResponse({"error": "bad doc json"}, status_code=400)
+        png = await image.read() if image is not None else None
+        if id and id > 0:
+            rec = registry.sketches.update(ps.part_id, id, doc_obj, png)
+            if rec is None:
+                return JSONResponse({"error": "not found", "id": id}, status_code=404)
+        else:
+            rec = registry.sketches.add(ps.part_id, doc_obj, png, label=label, note=note)
+        registry.hub.publish(ps.part_id, {
+            "type": "sketch", "part": ps.part_id, "id": rec["id"], "label": rec.get("label", ""),
+        })
+        return JSONResponse({"status": "ok", "part": ps.part_id, **rec})
+
+    @app.delete("/api/sketches")
+    async def api_sketch_delete(part: str = Form(...), id: int = Form(...)) -> JSONResponse:
+        ps = registry.resolve(part)
+        if ps is None:
+            return JSONResponse({"error": "unknown part", "part": part}, status_code=404)
+        ok = registry.sketches.delete(ps.part_id, id)
+        if ok:
+            registry.hub.publish(ps.part_id, {"type": "sketch", "part": ps.part_id})
+        return JSONResponse({"status": "ok" if ok else "not_found", "id": id})
+
     @app.websocket("/ws")
     async def ws(websocket: WebSocket) -> None:
         await websocket.accept()

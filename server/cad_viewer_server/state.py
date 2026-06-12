@@ -386,6 +386,10 @@ class Registry:
         from .references import ReferenceStore
 
         self.references = ReferenceStore()
+        # Disk-persisted, per-part technical-sketch library (shared with Claude).
+        from .sketches import SketchStore
+
+        self.sketches = SketchStore()
         # Disk-persisted, per-part parameter overrides.
         from .paramstore import ParamStore
 

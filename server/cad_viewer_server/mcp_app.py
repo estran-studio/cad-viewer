@@ -9,6 +9,7 @@ lock (OCP is not thread-safe).
 Tools: list_parts, select_part, open_part, list_feedback,
 get_annotated_feedback, get_current_render, rebuild_part, get_part_info,
 get_references, push_reference, compare_to_ref, add_reference_note,
+list_sketches, get_sketch,
 check_part, list_nodes, measure_distance, cross_section,
 get_part_params, set_part_params, apply_param_preset.
 """
@@ -65,6 +66,65 @@ def _image(png: bytes) -> ImageContent:
 
 def _text(s: str) -> TextContent:
     return TextContent(type="text", text=s)
+
+
+def _fmt_pt(p) -> str:
+    try:
+        return f"({float(p[0]):g}, {float(p[1]):g})"
+    except (TypeError, ValueError, IndexError):
+        return str(p)
+
+
+def _sketch_spec_text(doc: dict, meta: dict, sketch_id: int, part_id: str) -> str:
+    """Turn a sketch document into a readable dimensional spec for Claude."""
+    units = doc.get("units", "mm")
+    lines = [f"Croquis #{sketch_id} « {meta.get('label') or '(sans titre)'} » "
+             f"pour {part_id} — unités: {units}."]
+    if meta.get("note"):
+        lines.append(f"Note: {meta['note']}")
+
+    ents = doc.get("entities") or []
+    if ents:
+        lines.append(f"\nGéométrie ({len(ents)}):")
+        for e in ents:
+            t = e.get("type")
+            eid = e.get("id", "?")
+            if t == "line":
+                lines.append(f"  - {eid} ligne {_fmt_pt(e.get('p1'))} → {_fmt_pt(e.get('p2'))}")
+            elif t == "rect":
+                p0, p1 = e.get("p0") or [0, 0], e.get("p1") or [0, 0]
+                lines.append(f"  - {eid} rectangle {_fmt_pt(p0)} → {_fmt_pt(p1)} "
+                             f"({abs(p1[0] - p0[0]):g} × {abs(p1[1] - p0[1]):g})")
+            elif t == "circle":
+                lines.append(f"  - {eid} cercle centre {_fmt_pt(e.get('c'))} r={e.get('r')} (Ø{2 * e.get('r', 0):g})")
+            elif t == "arc":
+                lines.append(f"  - {eid} arc centre {_fmt_pt(e.get('c'))} r={e.get('r')} "
+                             f"de {e.get('a0')}° à {e.get('a1')}°")
+            elif t == "bezier":
+                lines.append(f"  - {eid} courbe bézier, {len(e.get('pts') or [])} points de contrôle")
+            elif t == "ink":
+                lines.append(f"  - {eid} trait à main levée (indicatif)")
+            else:
+                lines.append(f"  - {eid} {t}")
+
+    dims = doc.get("dimensions") or []
+    if dims:
+        lines.append(f"\nCotes ({len(dims)}) — SOURCE DE VÉRITÉ:")
+        for d in dims:
+            kind = d.get("kind", "?")
+            lbl = f" [{d['label']}]" if d.get("label") else ""
+            refs = ", ".join(d.get("refs") or [])
+            lines.append(f"  - {kind}{lbl} = {d.get('value')} {units}  (sur {refs})")
+
+    labels = doc.get("labels") or []
+    if labels:
+        lines.append("\nAnnotations:")
+        for lab in labels:
+            lines.append(f"  - {_fmt_pt(lab.get('at'))}: {lab.get('text', '')}")
+
+    if not dims:
+        lines.append("\n⚠️ Aucune cote — la géométrie est indicative, demande les dimensions à l'utilisateur.")
+    return "\n".join(lines)
 
 
 def _session_id(ctx: Context | None) -> str | None:
@@ -287,6 +347,46 @@ def build_mcp(registry: Registry) -> FastMCP:
              "label": rec["label"], "focus": bool(focus)},
             ensure_ascii=False,
         )
+
+    @mcp.tool()
+    def list_sketches(
+        limit: int = 12, part: str | None = None, ctx: Context = None  # type: ignore[assignment]
+    ) -> str:
+        """List the dimensioned technical sketches drawn for your part (cheap, no
+        image). Each entry has its label/note and entity/dimension counts. Use
+        `get_sketch(id)` to pull one sketch's dimensions + preview image."""
+        ps, err = _need(part, ctx)
+        if err:
+            return err
+        items = list(reversed(registry.sketches.list(ps.part_id)))[: max(1, limit)]
+        if not items:
+            return f"Aucun croquis technique pour {ps.part_id}."
+        return json.dumps({"part_id": ps.part_id, "sketches": items},
+                          ensure_ascii=False, indent=2)
+
+    @mcp.tool()
+    def get_sketch(
+        sketch_id: int, part: str | None = None, ctx: Context = None  # type: ignore[assignment]
+    ) -> list:
+        """One technical sketch as a DIMENSIONAL spec: a readable summary of every
+        line/circle/arc and every dimension (the cotes are the source of truth for
+        the build123d geometry), the raw JSON, and the preview image. Read the
+        dimensions to size the part — don't guess from the picture alone."""
+        ps, err = _need(part, ctx)
+        if err:
+            return [_text(err)]
+        doc = registry.sketches.get_doc(ps.part_id, sketch_id)
+        if doc is None:
+            return [_text(f"Croquis #{sketch_id} introuvable pour {ps.part_id}.")]
+        meta = registry.sketches.meta(ps.part_id, sketch_id) or {}
+        out: list = [
+            _text(_sketch_spec_text(doc, meta, sketch_id, ps.part_id)),
+            _text("JSON brut:\n" + json.dumps(doc, ensure_ascii=False, indent=2)),
+        ]
+        png = registry.sketches.get_png(ps.part_id, sketch_id)
+        if png:
+            out.append(_image(png))
+        return out
 
     @mcp.tool()
     async def compare_to_ref(

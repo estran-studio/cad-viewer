@@ -15,6 +15,7 @@
   import { onMount, onDestroy } from 'svelte';
   import './CADViewer.svelte'; // ensure <cad-viewer> is registered
   import { strokeToPath2D, pressureOf, type Stroke, type InkPoint } from './annotate/freehand.js';
+  import SketchEditor from './sketch/SketchEditor.svelte';
 
   export let viewerBackgroundColor = '#1e1e1e';
   export let apiBase = ''; // same origin when served by the Python backend
@@ -83,8 +84,16 @@
   let toast = '';
   let sending = false;
 
+  // ---- technical-sketch library (server-persisted, per part) ----
+  interface SketchInfo { id: number; label: string; note: string; created_at: number; n_entities: number; n_dims: number; url: string; }
+  let sketches: SketchInfo[] = [];
+  let sketchesBadge = false;     // new sketch arrived while the 📐 panel is closed
+  let sketchOpen = false;        // the editor is mounted over the main pane
+  let openSketchId: number | null = null; // null → new
+  let openSketchLabel = '';      // title to seed the editor with when reopening
+
   // ---- multi-part state ----
-  type SideView = 'parts' | 'params' | 'refs';
+  type SideView = 'parts' | 'params' | 'refs' | 'sketch';
   let parts: PartInfo[] = [];
   let currentPartId: string | null = null;
   let building = false;
@@ -126,6 +135,7 @@
     else { activeView = v; sidebarOpen = true; }
     if (v === 'refs') { refreshRefs(); refsBadge = false; }
     if (v === 'params') refreshParams();
+    if (v === 'sketch') { refreshSketches(); sketchesBadge = false; }
     saveStudioState();
   }
 
@@ -329,6 +339,9 @@
         } else if (msg.type === 'refs') {
           // Claude (or another tablet) changed this part's reference library.
           if (msg.part === currentPartId) onRefsChanged(msg);
+        } else if (msg.type === 'sketch') {
+          // Sketch library changed (another tablet / future push_sketch).
+          if (msg.part === currentPartId) onSketchChanged();
         }
       } catch { /* ignore */ }
     };
@@ -698,6 +711,47 @@
     openCompare(`${apiBase}${rf.url}`, rf.label, rf.id, null, (rf as any).px_per_mm);
   }
 
+  // ---- technical-sketch library ---------------------------------------
+  async function refreshSketches() {
+    if (!currentPartId) { sketches = []; return; }
+    try {
+      const r = await fetch(
+        `${apiBase}/api/sketches?part=${encodeURIComponent(currentPartId)}`,
+        { cache: 'no-store' }
+      );
+      const j = await r.json();
+      sketches = j.items || [];
+    } catch { /* keep last */ }
+  }
+
+  function newSketch() {
+    if (!currentPartId) return;
+    openSketchId = null; openSketchLabel = ''; sketchOpen = true;
+  }
+  function openSketch(s: SketchInfo) {
+    openSketchId = s.id; openSketchLabel = s.label || ''; sketchOpen = true;
+  }
+  function onSketchSaved() {
+    sketchOpen = false; openSketchId = null;
+    refreshSketches();
+  }
+  function closeSketch() { sketchOpen = false; openSketchId = null; }
+
+  async function deleteSketch(id: number) {
+    if (!currentPartId) return;
+    const fd = new FormData();
+    fd.append('part', currentPartId);
+    fd.append('id', String(id));
+    try { await fetch(`${apiBase}/api/sketches`, { method: 'DELETE', body: fd }); } catch { /* */ }
+    refreshSketches();
+  }
+
+  // A sketch was changed (another tablet / future push_sketch). Refresh + badge.
+  function onSketchChanged() {
+    refreshSketches();
+    if (activeView !== 'sketch' || !sidebarOpen) sketchesBadge = true;
+  }
+
   // ---- parameters ------------------------------------------------------
   async function refreshParams() {
     if (!currentPartId) { paramSchema = []; paramValues = {}; return; }
@@ -870,6 +924,9 @@
     <button class="actbtn" class:sel={activeView === 'refs' && sidebarOpen} title="Références" aria-label="Références" on:click={() => toggleView('refs')}>
       🖼{#if refsBadge}<span class="act-badge"></span>{/if}
     </button>
+    <button class="actbtn" class:sel={activeView === 'sketch' && sidebarOpen} title="Croquis techniques" aria-label="Croquis" on:click={() => toggleView('sketch')}>
+      📐{#if sketchesBadge}<span class="act-badge"></span>{/if}
+    </button>
   </nav>
 
   <!-- sidebar -->
@@ -955,7 +1012,7 @@
           {/each}
         {/if}
       </div>
-    {:else}
+    {:else if activeView === 'refs'}
       <div class="side-head">Références{#if currentPartId} · {refs.length}{/if}</div>
       <div class="side-scroll">
         {#if !currentPartId}
@@ -982,11 +1039,35 @@
           {/each}
         {/if}
       </div>
+    {:else}
+      <div class="side-head">Croquis{#if currentPartId} · {sketches.length}{/if}</div>
+      <div class="side-scroll">
+        {#if !currentPartId}
+          <div class="side-empty">Sélectionne une pièce.</div>
+        {:else}
+          <button class="ref-add" on:click={newSketch}>＋ Nouveau croquis</button>
+          {#if !sketches.length}
+            <div class="side-empty">Aucun croquis. Dessine un schéma coté — Claude le lit (cotes + image) pour écrire le build123d.</div>
+          {/if}
+          {#each sketches as sk (sk.id)}
+            <div class="ref-card">
+              <button class="ref-thumb" on:click={() => openSketch(sk)} title="Ouvrir / éditer">
+                <img src={`${apiBase}${sk.url}`} alt={sk.label || ('croquis ' + sk.id)} />
+              </button>
+              <div class="ref-meta">
+                <div class="ref-label">{sk.label || ('croquis #' + sk.id)}</div>
+                <div class="ref-note">{sk.n_entities} forme(s) · {sk.n_dims} cote(s)</div>
+              </div>
+              <button class="ref-del" aria-label="supprimer" title="supprimer" on:click={() => deleteSketch(sk.id)}>🗑</button>
+            </div>
+          {/each}
+        {/if}
+      </div>
     {/if}
   </aside>
 
   <!-- main: viewer pane (+ optional reference dock for compare/annotate) -->
-  <main class="main" bind:this={mainEl} class:has-dock={!!compareRef}>
+  <main class="main" bind:this={mainEl} class:has-dock={!!compareRef} class:sketching={sketchOpen}>
     <div class="viewer-pane" bind:this={viewerPaneEl}>
       <cad-viewer
         bind:this={viewerEl}
@@ -1061,6 +1142,17 @@
         <button class="primary" on:click={send} disabled={sending}>{sending ? '…' : '➤ Envoyer'}</button>
         <button on:click={exitDraw}>✕</button>
       </div>
+    {/if}
+
+    {#if sketchOpen && currentPartId}
+      <SketchEditor
+        {apiBase}
+        partId={currentPartId}
+        sketchId={openSketchId}
+        label={openSketchLabel}
+        on:saved={onSketchSaved}
+        on:close={closeSketch}
+      />
     {/if}
 
     {#if toast}<div class="toast">{toast}</div>{/if}
@@ -1260,6 +1352,9 @@
   /* main viewer pane — cad-viewer + its own toolbar/gizmo live here */
   .main { grid-area: main; position: relative; min-width: 0; overflow: hidden; }
   .viewer-pane { position: absolute; inset: 0; }
+  /* While the sketch editor is open, hide the 3D viewer (incl. its z-index:1000
+     orientation gizmo, which would otherwise paint above the editor). */
+  .main.sketching .viewer-pane { visibility: hidden; }
   cad-viewer { position: absolute; inset: 0; width: 100%; height: 100%; display: block; }
   /* overlay spans the WHOLE main (viewer + dock) so a stroke crosses both */
   .overlay { position: absolute; inset: 0; touch-action: none; pointer-events: none; z-index: 5; }

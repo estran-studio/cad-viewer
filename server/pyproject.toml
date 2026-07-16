@@ -13,6 +13,12 @@ dependencies = [
     "matplotlib>=3.8",
     "numpy>=1.26",
     "pillow>=10",
+    # Dépendances des PIÈCES rendues, pas du serveur : une pièce paramétrique
+    # lit ses knobs dans un YAML (`designs/*.yaml`) et lisse ses coupes avant
+    # loft. Sans elles, la pièce échoue au build avec un simple
+    # ModuleNotFoundError côté worker.
+    "pyyaml>=6",
+    "scipy>=1.11",
 ]
 
 [project.scripts]

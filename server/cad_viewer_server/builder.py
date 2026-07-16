@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import itertools
 import logging
+import os
 import queue
 import threading
 import time
@@ -37,6 +38,25 @@ PRIO_INTERACTIVE = 0   # tablet/MCP is actively loading this part — build now
 PRIO_EDIT = 5          # the part whose own .py the user just saved
 PRIO_BACKGROUND = 10   # collateral rebuilds (shared helper changed, etc.)
 PRIO_PREWARM = 20      # speculative builds of other param combos (lowest)
+
+
+def _default_build_timeout() -> float:
+    """Seconds a caller waits for a build before giving up (the build itself
+    keeps going and still lands in the cache).
+
+    180 s is not enough for a dense loft: the Fleet `arrow` measures 125 s
+    native arm64 but ~303 s in the linux/amd64 image under Rosetta (~2.4×
+    penalty), so every first open reported a bogus "build failed". Override
+    with CAD_VIEWER_BUILD_TIMEOUT.
+    """
+    env = os.environ.get("CAD_VIEWER_BUILD_TIMEOUT", "")
+    try:
+        return float(env) if float(env) > 0 else 600.0
+    except ValueError:
+        return 600.0
+
+
+BUILD_TIMEOUT = _default_build_timeout()
 
 
 class BuildQueue:
@@ -91,7 +111,7 @@ class BuildQueue:
         self,
         ps: "PartState",
         priority: int = PRIO_INTERACTIVE,
-        timeout: float = 180.0,
+        timeout: float | None = None,
     ) -> None:
         """Block until `ps` has been built at least once from now, or timeout.
 
@@ -102,17 +122,17 @@ class BuildQueue:
             return
         start = ps.build_attempts
         self.request(ps, priority)
-        deadline = time.time() + timeout
+        deadline = time.time() + (BUILD_TIMEOUT if timeout is None else timeout)
         with ps.build_cv:
             while ps.build_attempts == start and time.time() < deadline:
                 ps.build_cv.wait(timeout=max(0.05, deadline - time.time()))
 
-    def rebuild_and_wait(self, ps: "PartState", timeout: float = 180.0) -> None:
+    def rebuild_and_wait(self, ps: "PartState", timeout: float | None = None) -> None:
         """Force a fresh build of the CURRENT combo (ignores cache) and wait."""
         start = ps.build_attempts
         ps.cache_clear()
         self.request(ps, PRIO_INTERACTIVE)
-        deadline = time.time() + timeout
+        deadline = time.time() + (BUILD_TIMEOUT if timeout is None else timeout)
         with ps.build_cv:
             while ps.build_attempts == start and time.time() < deadline:
                 ps.build_cv.wait(timeout=max(0.05, deadline - time.time()))

@@ -13,12 +13,15 @@ RUN npm run build      # → /web/dist/{components.js, index.html, …}
 
 
 # ---------- stage 2: runtime (Python + uv + build123d) ----------
-# linux/amd64 obligatoire : cadquery-ocp n'a pas de wheel linux/arm64
-# (confirmed 2026-05-28 — seulement macosx_11_0_arm64 mais pas linux/aarch64).
-# Tourne via Rosetta sur Apple Silicon (OrbStack/Docker Desktop natif).
-# Pour build natif ARM = exécuter cad-viewer-serve directement sur le Mac
-# (hors Docker), wheel macosx_11_0_arm64 dispo pour cadquery-ocp.
-FROM --platform=linux/amd64 python:3.13-slim AS runtime
+# Multi-arch : pas de `--platform`, l'image suit l'arch de l'hôte.
+# Historique : jusqu'à cadquery-ocp 7.8.x il n'existait aucun wheel
+# linux/aarch64 (confirmé 2026-05-28), d'où un `--platform=linux/amd64` + Rosetta
+# sur Apple Silicon. Réglé depuis 7.9.3.0, qui publie manylinux_2_31_aarch64 ;
+# build123d >=0.11 le tire via cadquery-ocp-novtk (le serveur rend ses PNG avec
+# matplotlib, jamais VTK → la variante novtk suffit).
+# Mesuré sur le loft dense `arrow` : 127 s en arm64 natif contre 303 s sous
+# Rosetta. Si un wheel manque pour une arch, forcer `--platform=linux/amd64`.
+FROM python:3.13-slim AS runtime
 ENV PYTHONUNBUFFERED=1 \
     UV_LINK_MODE=copy \
     UV_PROJECT_ENVIRONMENT=/app/server/.venv

@@ -15,9 +15,11 @@ services:
       dockerfile: Dockerfile
     image: cad-viewer:latest
     container_name: cad-viewer
-    # cadquery-ocp ne publie pas de wheel linux/arm64 — on tourne en
-    # linux/amd64 via Rosetta (supporté nativement par OrbStack/Apple Silicon).
-    platform: linux/amd64
+    # Pas de `platform:` → l'image suit l'arch de l'hôte (arm64 natif sur Apple
+    # Silicon, plus de Rosetta). Possible depuis cadquery-ocp 7.9.3.0, qui
+    # publie enfin des wheels manylinux_2_31_aarch64 ; build123d >=0.11 les
+    # tire via cadquery-ocp-novtk. Mesuré sur le loft `arrow` : 127 s en arm64
+    # natif contre 303 s sous Rosetta.
     restart: unless-stopped
     ports:
       - "32325:32325"
@@ -45,8 +47,8 @@ services:
       # plafonné pour borner la RAM. Ajuste selon les cœurs/RAM dispo.
       CAD_VIEWER_BUILD_WORKERS: "4"
       # Attente max d'un build avant que l'appelant abandonne (le build, lui,
-      # continue et atterrit en cache). Le loft dense de `arrow` : 125 s en
-      # natif arm64 contre ~303 s ici sous Rosetta (pénalité ~2.4×).
+      # continue et atterrit en cache). Marge large : le loft dense de `arrow`
+      # prend ~127 s en arm64 natif (303 s du temps de Rosetta).
       CAD_VIEWER_BUILD_TIMEOUT: "600"
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:32325/api/parts',timeout=2).status==200 else 1)"]
